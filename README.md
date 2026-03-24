@@ -4,35 +4,53 @@
 
 It implements an end-to-end SOC-style pipeline — **ingest → detect → persist → visualize** — with each stage in its own service.
 
+---
+
 ## Stack
 
 | Piece | Role |
-|--------|------|
+| :--- | :--- |
 | **Next.js** | Dashboard: metrics, alerts, events, blocks, Port Guard, CSV export |
 | **nginx** | Single entry (`:8080`), routes to UI + APIs |
-| **FastAPI (logging)** | Ingest, scoring (rules + anomaly layer), events, alerts, blocks, summaries, **OpenAI-backed alert enrichment** |
+| **FastAPI (logging)** | Ingest, scoring (rules + anomaly), events, alerts, blocks, summaries, OpenAI-backed enrichment |
 | **FastAPI (demo-app)** | Sample app that emits traffic into the pipeline |
-| **FastAPI (portguard)** | Scheduled/on-demand TCP probes of allowlisted internal hosts; webhooks new open ports |
+| **FastAPI (portguard)** | Scheduled / on-demand TCP probes of allowlisted hosts; webhooks new open ports |
 | **Postgres** | Logs, events, alerts, blocks, scans, schedule prefs |
+
+---
 
 ## What it does
 
-**Detection**  
-Looks for bad patterns (like many failed logins, traffic spikes, or odd URL/status mix).  
-Combines **fixed rules** with a small **behavioral/anomaly** bump, then assigns a **score** and **severity**.
+### Detection
 
-**Response**  
-Turns serious scores into **alerts**. **Critical** can **auto-block** the IP. **Lower** severities can be **blocked manually** from the dashboard. **Port Guard** can alert when **new ports** show up on internal hosts.
+- Watches for risky patterns: e.g. many failed logins, traffic spikes, odd URL / status mix.
+- Merges **rule-based signals** with a small **behavioral / anomaly** layer.
+- Produces a **score** and **severity** for each threat event.
 
-**AI (OpenAI)**  
-One API call can add to each new alert: a **short explanation**, an **advisory risk score (0–100)**, and **suggested next steps** — shown on the dashboard and stored in the DB.  
-**Who’s in charge?** Rules + anomaly scores still set **severity** and **blocking**. You turn AI pieces on/off in `.env`. You can also **auto-ack** alerts when the AI score is very low (noise control).
+### Response
 
-**Dashboard**  
-Live **metrics**, **alerts** and **events** (with severity filters), **Activity summary** (last hour or 24h), and quick checks that summary numbers add up.
+- Raises **alerts** from higher scores.
+- **Critical** → can **auto-block** the source IP.
+- **Lower severities** → **manual block** from the dashboard.
+- **Port Guard** → alerts when **new ports** appear on scanned internal targets.
 
-**Day-to-day**  
-You can **pause** or slow **auto-refresh**. Run **`scripts/validate_stack.ps1`** to print summary health from the API.
+### AI (OpenAI)
+
+- Adds (per new alert, one round-trip): **plain-English summary**, **advisory 0–100 score**, **suggested next steps** — stored and shown in the UI.
+- **Severity and blocking** still come from **rules + anomaly** (not the model).
+- Configure in **`.env`**: API key, toggles per AI field, optional **auto-ack** for very low AI scores.
+
+### Dashboard
+
+- **Metrics**, **alerts**, **events** (with severity filters).
+- **Activity summary** (1h / 24h) plus quick **sanity checks** on the numbers.
+
+### Ops
+
+- **Pause** or change **auto-refresh** interval on the dashboard.
+- **`scripts/validate_stack.ps1`** — prints summary health from the API.
+
+---
 
 ## Run
 
@@ -40,6 +58,9 @@ You can **pause** or slow **auto-refresh**. Run **`scripts/validate_stack.ps1`**
 docker compose up --build -d
 ```
 
-Open **http://localhost:8080**. Stop with `docker compose down`.
-
-Copy **`.env.example`** → **`.env`**. Set **`OPENAI_API_KEY`** for LLM triage; see the example file for **`OPENAI_MODEL`**, feature toggles, and **`AI_AUTO_ACK_WHEN_AI_SCORE_LE`**.
+| Step | Action |
+| :--- | :--- |
+| 1 | Open **http://localhost:8080** |
+| 2 | Stop with `docker compose down` |
+| 3 | Copy **`.env.example`** → **`.env`** |
+| 4 | Set **`OPENAI_API_KEY`** for LLM triage; see `.env.example` for model name, AI toggles, and `AI_AUTO_ACK_WHEN_AI_SCORE_LE` |
