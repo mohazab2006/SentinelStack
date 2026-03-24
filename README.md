@@ -1,8 +1,8 @@
 # SentinelStack
 
-**End-to-end AI-augmented SOC lab in Docker.** Telemetry flows from ingest through detection and scoring, into **structured OpenAI completions** on alerts, and out to a live operator dashboard. The point is one continuous pipeline where **generative AI is built in**, not bolted on: every serious alert can carry model-generated **context**, **risk framing**, and **recommended actions** alongside classic SOC fields.
+**Dockerized security monitoring lab** that wires together request logging, hybrid detection (rules plus lightweight behavioral scoring), alerting, IP blocking, internal port drift detection, a Next.js operations dashboard, and **LLM-assisted triage** on top of deterministic scoring.
 
-Under the hood the same pipeline is **ingest → detect → enrich → persist → visualize**, with **clear service boundaries** so each stage stays testable and swappable.
+The design is an end-to-end SOC-style pipeline, **ingest → detect → persist → visualize**, with **clear service boundaries** so each concern stays testable and replaceable.
 
 ---
 
@@ -10,12 +10,12 @@ Under the hood the same pipeline is **ingest → detect → enrich → persist �
 
 | Piece | Role |
 | :--- | :--- |
-| **Next.js** | Operator dashboard: metrics, AI-enriched alert and event views, Port Guard, CSV export, refresh controls |
+| **Next.js** | Operator dashboard: metrics, filtered lists, Port Guard, CSV export, refresh controls |
 | **nginx** | Single public entry (`:8080`), reverse proxy to UI and APIs |
-| **FastAPI (logging)** | Ingest, hybrid scoring, threat events, alerts, block list, rollups, **integrated OpenAI completion path** for alert intelligence |
+| **FastAPI (logging)** | Ingest, scoring pipeline, threat events, alerts, block list, rollups, OpenAI-backed enrichment |
 | **FastAPI (demo-app)** | Reference workload that forwards telemetry into the logging API |
 | **FastAPI (portguard)** | Allowlisted TCP discovery, scan history, scheduled sweeps, webhooks for newly open ports |
-| **Postgres** | Durable store for logs, events, alerts, blocks, scan results, AI fields, persisted schedule preferences |
+| **Postgres** | Durable store for logs, events, alerts, blocks, scan results, persisted schedule preferences |
 
 ---
 
@@ -23,33 +23,33 @@ Under the hood the same pipeline is **ingest → detect → enrich → persist �
 
 ### Detection
 
-- Correlates HTTP telemetry into **coherent signals**: credential abuse, volume anomalies, recon-style paths and status patterns.
-- Layers **explicit thresholds** with a capped **anomaly contribution** so every score stays explainable before it ever reaches the AI layer.
-- Outputs feed **alerts** that the **LLM pipeline** can complete with narrative and recommendations in the same request lifecycle.
+- Correlates noisy HTTP telemetry into **coherent signals**: credential abuse, volume anomalies, recon-style paths and status patterns.
+- Layers **explicit thresholds** with a capped **anomaly contribution** so scoring stays explainable and bounded.
+- Every evaluated episode gets a numeric **score**, a **severity** band, and structured **reasons** suitable for review and automation.
 
 ### Response
 
-- Promotes high-confidence outcomes to **alerts** with traceability to the underlying event.
+- Promotes high-confidence outcomes to **alerts** with full traceability back to the underlying event.
 - **Critical** paths can **automatically block** the offending source IP for a configurable window.
-- **Sub-critical** cases support **operator-driven blocks** from the dashboard.
-- **Port Guard** compares successive scans and surfaces **newly exposed listeners** on internal targets.
+- **Sub-critical** cases support **operator-driven blocks** directly from the dashboard.
+- **Port Guard** compares successive scans and surfaces **newly exposed listeners** on internal targets as first-class findings.
 
-### AI in the loop
+### AI (OpenAI)
 
-- **One structured OpenAI completion per qualifying alert** adds **narrative context**, a **0 to 100 AI risk read** that frames the situation for humans, and **concrete next steps**. Results are **persisted** and shown **next to scores and reasons** so triage stays in one screen.
-- **Deterministic detection** (rules plus anomaly math) gives you **fast triggers and auditable baselines**. The **LLM layer** turns those triggers into **interpretable, action-oriented intelligence** so operators spend less time deciphering raw signals.
-- **`.env`** controls the full AI stack: API credentials, model id, per-output toggles, and workflow helpers such as **auto-ack** when the model’s risk read sits below a floor you define.
+- Enriches qualifying alerts in **one structured completion**: narrative context, an **advisory 0 to 100** risk read (independent of the stack score), and **actionable recommendations**, persisted and rendered beside traditional fields.
+- **Severity, blocking, and policy** remain owned by **rules and anomaly math**; the model is advisory unless you wire explicit automation (for example low-score auto-ack).
+- Behavior is **fully driven by `.env`**: credentials, model id, per-feature toggles, and optional acknowledgment thresholds.
 
 ### Dashboard
 
-- Unified **live posture**: volume, alert backlog, active blocks, Port Guard history, **and LLM-generated fields** on events and alerts.
-- **Activity summary** (1 hour / 24 hours) with **consistency hints** on rollup math.
-- **Severity filters** for focused triage sessions.
+- Unified view of **live posture**: request and event volume, alert backlog, active blocks, Port Guard history.
+- **Activity summary** windows (1 hour / 24 hours) include **consistency hints** so operators can sanity-check rollups at a glance.
+- **Severity filters** keep long-running triage sessions focused.
 
 ### Ops
 
 - **Pause or retune** full-page auto-refresh without redeploying.
-- **`scripts/validate_stack.ps1`**: lightweight smoke against the metrics summary API for demos and checks.
+- **`scripts/validate_stack.ps1`**: lightweight smoke against the metrics summary API for demos and CI-style checks.
 
 ---
 
@@ -64,4 +64,4 @@ docker compose up --build -d
 | 1 | Browse **http://localhost:8080** |
 | 2 | Tear down with `docker compose down` |
 | 3 | Copy **`.env.example`** to **`.env`** and adjust secrets |
-| 4 | Set **`OPENAI_API_KEY`** so the **AI completion path** is live; `.env.example` lists model selection, feature toggles, and **`AI_AUTO_ACK_WHEN_AI_SCORE_LE`** |
+| 4 | Provide **`OPENAI_API_KEY`** for LLM features; `.env.example` documents model selection, AI flags, and **`AI_AUTO_ACK_WHEN_AI_SCORE_LE`** |
