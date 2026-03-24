@@ -4,8 +4,11 @@ from typing import Annotated, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Query
 
+from .ai_explain import optional_alert_explanation
+from .anomaly import compute_anomaly
 from .db import close_pool, get_pool
 from .schemas import (
+    ActivitySummary,
     Alert,
     BlockedIp,
     BlockIpRequest,
@@ -13,6 +16,7 @@ from .schemas import (
     PortguardIngestRequest,
     PortguardNewPortItem,
     RequestLog,
+    SummaryNamedCount,
     ThreatEvent,
 )
 
@@ -43,6 +47,20 @@ HIGH_MAX = env_int("HIGH_MAX", 79)
 AUTO_BLOCK_MINUTES = env_int("AUTO_BLOCK_MINUTES", 60)
 PORTGUARD_WEBHOOK_SECRET = os.getenv("PORTGUARD_WEBHOOK_SECRET", "").strip()
 PORTGUARD_ALERT_DEDUPE_MINUTES = env_int("PORTGUARD_ALERT_DEDUPE_MINUTES", 45)
+
+_SEVERITY_LEVELS = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
+
+
+def normalize_severity_filter(raw: Optional[str]) -> Optional[str]:
+    if raw is None or raw.strip() == "":
+        return None
+    s = raw.strip().upper()
+    if s not in _SEVERITY_LEVELS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"severity must be one of: {', '.join(sorted(_SEVERITY_LEVELS))}",
+        )
+    return s
 
 
 @app.on_event("startup")
@@ -164,7 +182,12 @@ async def ingest_request(payload: IngestRequest) -> dict[str, str]:
         )
         rule_score, reasons, event_type = await evaluate_rules(conn, payload.ip_address)
         if rule_score > 0:
-            severity = score_to_severity(rule_score)
+            anomaly_score, anomaly_reasons = await compute_anomaly(conn, payload.ip_address)
+            final_score = min(100, rule_score + anomaly_score)
+            all_reasons = list(reasons)
+            if anomaly_reasons:
+                all_reasons.extend([f"anomaly: {r}" for r in anomaly_reasons])
+            severity = score_to_severity(final_score)
             # Avoid alert storms by suppressing duplicates for the same rule/IP over 2 minutes.
             duplicate = await conn.fetchval(
                 """
@@ -178,23 +201,37 @@ async def ingest_request(payload: IngestRequest) -> dict[str, str]:
                 """,
                 payload.ip_address,
                 event_type,
-                rule_score,
+                final_score,
             )
             if duplicate is None:
+                reasons_text = "; ".join(all_reasons)
                 event_id = await conn.fetchval(
                     """
                     INSERT INTO threat_events (ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons)
-                    VALUES ($1, $2, $3, 0, $3, $4, $5)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                     RETURNING id
                     """,
                     payload.ip_address,
                     event_type,
                     rule_score,
+                    anomaly_score,
+                    final_score,
                     severity,
-                    ", ".join(reasons),
+                    reasons_text,
                 )
                 if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
-                    message = f"{severity} threat from {payload.ip_address}: " + "; ".join(reasons)
+                    ai_line = await optional_alert_explanation(
+                        subject=f"IP {payload.ip_address}",
+                        event_type=event_type,
+                        severity=severity,
+                        reasons_text=reasons_text,
+                        rule_score=rule_score,
+                        anomaly_score=anomaly_score,
+                        final_score=final_score,
+                    )
+                    message = f"{severity} threat from {payload.ip_address}: " + reasons_text
+                    if ai_line:
+                        message += f" | AI: {ai_line}"
                     await conn.execute(
                         """
                         INSERT INTO alerts (threat_event_id, severity, message)
@@ -208,7 +245,7 @@ async def ingest_request(payload: IngestRequest) -> dict[str, str]:
                     await block_ip_in_db(
                         conn=conn,
                         ip_address=payload.ip_address,
-                        reason=f"auto-block: {'; '.join(reasons)}",
+                        reason=f"auto-block: {reasons_text}",
                         duration_minutes=AUTO_BLOCK_MINUTES,
                     )
     return {"status": "logged"}
@@ -285,13 +322,25 @@ async def ingest_portguard(
             reasons,
         )
         if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
-            message = (
-                f"{severity} Port Guard: newly open ports on {payload.target} (scan {payload.scan_id}) — "
-                + "; ".join(
-                    f"{p.port} ({p.service or 'unknown'}, {p.risk_level})"
-                    for p in sorted(payload.new_ports, key=lambda x: x.port)
-                )
+            port_detail = "; ".join(
+                f"{p.port} ({p.service or 'unknown'}, {p.risk_level})"
+                for p in sorted(payload.new_ports, key=lambda x: x.port)
             )
+            message = (
+                f"{severity} Port Guard: newly open ports on {payload.target} "
+                f"(scan {payload.scan_id}) - {port_detail}"
+            )
+            ai_line = await optional_alert_explanation(
+                subject=f"Port Guard target {payload.target}",
+                event_type=event_type,
+                severity=severity,
+                reasons_text=reasons,
+                rule_score=rule_score,
+                anomaly_score=0,
+                final_score=rule_score,
+            )
+            if ai_line:
+                message += f" | AI: {ai_line}"
             await conn.execute(
                 """
                 INSERT INTO alerts (threat_event_id, severity, message)
@@ -321,34 +370,68 @@ async def get_logs(limit: int = Query(default=50, ge=1, le=500)) -> List[Request
 
 
 @app.get("/events", response_model=List[ThreatEvent])
-async def get_events(limit: int = Query(default=50, ge=1, le=500)) -> List[ThreatEvent]:
+async def get_events(
+    limit: int = Query(default=50, ge=1, le=500),
+    severity: Optional[str] = Query(default=None, description="Filter by LOW|MEDIUM|HIGH|CRITICAL"),
+) -> List[ThreatEvent]:
+    sev = normalize_severity_filter(severity)
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at
-            FROM threat_events
-            ORDER BY created_at DESC
-            LIMIT $1
-            """,
-            limit,
-        )
+        if sev:
+            rows = await conn.fetch(
+                """
+                SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at
+                FROM threat_events
+                WHERE severity = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                sev,
+                limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at
+                FROM threat_events
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
     return [ThreatEvent(**dict(row)) for row in rows]
 
 
 @app.get("/alerts", response_model=List[Alert])
-async def get_alerts(limit: int = Query(default=50, ge=1, le=500)) -> List[Alert]:
+async def get_alerts(
+    limit: int = Query(default=50, ge=1, le=500),
+    severity: Optional[str] = Query(default=None, description="Filter by LOW|MEDIUM|HIGH|CRITICAL"),
+) -> List[Alert]:
+    sev = normalize_severity_filter(severity)
     pool = await get_pool()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            """
-            SELECT id, threat_event_id, severity, message, created_at, acknowledged
-            FROM alerts
-            ORDER BY created_at DESC
-            LIMIT $1
-            """,
-            limit,
-        )
+        if sev:
+            rows = await conn.fetch(
+                """
+                SELECT id, threat_event_id, severity, message, created_at, acknowledged
+                FROM alerts
+                WHERE severity = $1
+                ORDER BY created_at DESC
+                LIMIT $2
+                """,
+                sev,
+                limit,
+            )
+        else:
+            rows = await conn.fetch(
+                """
+                SELECT id, threat_event_id, severity, message, created_at, acknowledged
+                FROM alerts
+                ORDER BY created_at DESC
+                LIMIT $1
+                """,
+                limit,
+            )
     return [Alert(**dict(row)) for row in rows]
 
 
@@ -460,6 +543,100 @@ async def get_severity_metrics() -> dict[str, int]:
         if severity in counts:
             counts[severity] = int(row["count"])
     return counts
+
+
+def _parse_summary_window(window: str) -> tuple[str, str]:
+    w = (window or "24h").strip().lower()
+    if w == "1h":
+        return "1h", "1 hour"
+    if w == "24h":
+        return "24h", "24 hours"
+    raise HTTPException(status_code=400, detail="window must be 1h or 24h")
+
+
+@app.get("/metrics/summary", response_model=ActivitySummary)
+async def get_activity_summary(
+    window: str = Query(default="24h", description="Time window: 1h or 24h"),
+) -> ActivitySummary:
+    window_key, interval = _parse_summary_window(window)
+    pool = await get_pool()
+    sev_template = {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0}
+    async with pool.acquire() as conn:
+        await deactivate_expired_blocks(conn)
+        requests_n = await conn.fetchval(
+            f"""
+            SELECT COUNT(*) FROM request_logs
+            WHERE timestamp >= NOW() - INTERVAL '{interval}'
+            """
+        )
+        events_n = await conn.fetchval(
+            f"""
+            SELECT COUNT(*) FROM threat_events
+            WHERE created_at >= NOW() - INTERVAL '{interval}'
+            """
+        )
+        alerts_n = await conn.fetchval(
+            f"""
+            SELECT COUNT(*) FROM alerts
+            WHERE created_at >= NOW() - INTERVAL '{interval}'
+            """
+        )
+        open_alerts = await conn.fetchval("SELECT COUNT(*) FROM alerts WHERE acknowledged = FALSE")
+        active_blocks = await conn.fetchval("SELECT COUNT(*) FROM blocked_ips WHERE active = TRUE")
+        sev_rows = await conn.fetch(
+            f"""
+            SELECT severity, COUNT(*)::INT AS c
+            FROM alerts
+            WHERE created_at >= NOW() - INTERVAL '{interval}'
+            GROUP BY severity
+            """
+        )
+        top_ip_rows = await conn.fetch(
+            f"""
+            SELECT ip_address, COUNT(*)::INT AS c
+            FROM threat_events
+            WHERE created_at >= NOW() - INTERVAL '{interval}'
+            GROUP BY ip_address
+            ORDER BY c DESC
+            LIMIT 5
+            """
+        )
+        top_type_rows = await conn.fetch(
+            f"""
+            SELECT event_type, COUNT(*)::INT AS c
+            FROM threat_events
+            WHERE created_at >= NOW() - INTERVAL '{interval}'
+            GROUP BY event_type
+            ORDER BY c DESC
+            LIMIT 5
+            """
+        )
+    alerts_by_severity = dict(sev_template)
+    for row in sev_rows:
+        s = row["severity"]
+        if s in alerts_by_severity:
+            alerts_by_severity[s] = int(row["c"])
+    top_ips = [SummaryNamedCount(name=row["ip_address"], count=int(row["c"])) for row in top_ip_rows]
+    top_types = [SummaryNamedCount(name=row["event_type"], count=int(row["c"])) for row in top_type_rows]
+    alerts_severity_sum = sum(alerts_by_severity.values())
+    alerts_n_int = int(alerts_n or 0)
+    top_ip_rows_sum = sum(t.count for t in top_ips)
+    events_n_int = int(events_n or 0)
+    return ActivitySummary(
+        window=window_key,
+        requests_in_window=int(requests_n or 0),
+        events_in_window=events_n_int,
+        alerts_created_in_window=alerts_n_int,
+        open_alerts=int(open_alerts or 0),
+        active_blocks=int(active_blocks or 0),
+        alerts_by_severity=alerts_by_severity,
+        top_event_ips=top_ips,
+        top_event_types=top_types,
+        alerts_severity_sum=alerts_severity_sum,
+        alerts_count_consistent=alerts_severity_sum == alerts_n_int,
+        top_event_ip_rows_sum=top_ip_rows_sum,
+        top_ips_counts_valid=top_ip_rows_sum <= events_n_int,
+    )
 
 
 def score_to_severity(score: int) -> str:

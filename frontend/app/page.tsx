@@ -1,6 +1,9 @@
+import { Suspense } from "react";
 import OperationsPanel from "./components/OperationsPanel";
 import PortGuardSection from "./components/PortGuardSection";
 import AutoRefresh from "./components/AutoRefresh";
+import SummaryPanel from "./components/SummaryPanel";
+import TableSeverityFilters from "./components/TableSeverityFilters";
 
 type RequestLog = {
   id: number;
@@ -117,8 +120,12 @@ async function getLogs(): Promise<RequestLog[]> {
   return response.json();
 }
 
-async function getAlerts(): Promise<Alert[]> {
-  const response = await fetch(`${apiBase}/alerts?limit=20`, {
+async function getAlerts(limit: number, severity?: string): Promise<Alert[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (severity) {
+    params.set("severity", severity);
+  }
+  const response = await fetch(`${apiBase}/alerts?${params}`, {
     cache: "no-store"
   });
   if (!response.ok) {
@@ -127,14 +134,29 @@ async function getAlerts(): Promise<Alert[]> {
   return response.json();
 }
 
-async function getEvents(): Promise<ThreatEvent[]> {
-  const response = await fetch(`${apiBase}/events?limit=20`, {
+async function getEvents(limit: number, severity?: string): Promise<ThreatEvent[]> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (severity) {
+    params.set("severity", severity);
+  }
+  const response = await fetch(`${apiBase}/events?${params}`, {
     cache: "no-store"
   });
   if (!response.ok) {
     throw new Error("Failed to load threat events");
   }
   return response.json();
+}
+
+function severityFromSearchParam(raw: string | undefined): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const u = raw.trim().toUpperCase();
+  if (u === "LOW" || u === "MEDIUM" || u === "HIGH" || u === "CRITICAL") {
+    return u;
+  }
+  return undefined;
 }
 
 async function getBlockedIps(): Promise<BlockedIp[]> {
@@ -194,11 +216,19 @@ function getErrorMessage(error: unknown) {
   return "Unknown error";
 }
 
-export default async function HomePage() {
+type HomePageProps = {
+  searchParams: { alertSeverity?: string; eventSeverity?: string };
+};
+
+export default async function HomePage({ searchParams }: HomePageProps) {
+  const alertSeverity = severityFromSearchParam(searchParams.alertSeverity);
+  const eventSeverity = severityFromSearchParam(searchParams.eventSeverity);
+
   const [
     logsResult,
     alertsResult,
     eventsResult,
+    eventsLookupResult,
     blockedIpsResult,
     overviewResult,
     severityResult,
@@ -206,8 +236,9 @@ export default async function HomePage() {
     portguardScheduleResult
   ] = await Promise.allSettled([
     getLogs(),
-    getAlerts(),
-    getEvents(),
+    getAlerts(50, alertSeverity),
+    getEvents(50, eventSeverity),
+    getEvents(200),
     getBlockedIps(),
     getOverviewMetrics(),
     getSeverityMetrics(),
@@ -232,7 +263,12 @@ export default async function HomePage() {
     loadErrors.push(`Threat events unavailable: ${getErrorMessage(eventsResult.reason)}`);
   }
 
-  const eventById = new Map(events.map((event) => [event.id, event]));
+  const eventsLookup = eventsLookupResult.status === "fulfilled" ? eventsLookupResult.value : [];
+  if (eventsLookupResult.status === "rejected") {
+    loadErrors.push(`Threat event lookup unavailable: ${getErrorMessage(eventsLookupResult.reason)}`);
+  }
+
+  const eventById = new Map(eventsLookup.map((event) => [event.id, event]));
 
   const blockedIps = blockedIpsResult.status === "fulfilled" ? blockedIpsResult.value : [];
   if (blockedIpsResult.status === "rejected") {
@@ -318,6 +354,8 @@ export default async function HomePage() {
         ))}
       </section>
 
+      <SummaryPanel />
+
       <OperationsPanel alerts={alerts} blockedIps={blockedIps} />
 
       <PortGuardSection
@@ -326,6 +364,10 @@ export default async function HomePage() {
         defaultTarget={portguardDefaultTarget}
         schedule={portguardSchedule}
       />
+
+      <Suspense fallback={null}>
+        <TableSeverityFilters />
+      </Suspense>
 
       <section className="card">
         <div className="card-header">

@@ -71,3 +71,32 @@ class PortguardIngestRequest(BaseModel):
     target: str = Field(..., min_length=1, max_length=256)
     scan_id: int = Field(..., ge=1)
     new_ports: List[PortguardNewPortItem] = Field(..., min_length=1)
+
+
+class SummaryNamedCount(BaseModel):
+    name: str
+    count: int
+
+
+class ActivitySummary(BaseModel):
+    window: str
+    requests_in_window: int
+    events_in_window: int
+    alerts_created_in_window: int
+    open_alerts: int
+    active_blocks: int
+    alerts_by_severity: dict[str, int]
+    top_event_ips: List[SummaryNamedCount]
+    top_event_types: List[SummaryNamedCount]
+    alerts_severity_sum: int = Field(
+        description="Sum of alerts_by_severity; should match alerts_created_in_window",
+    )
+    alerts_count_consistent: bool = Field(
+        description="True when severity buckets sum to new alerts in window",
+    )
+    top_event_ip_rows_sum: int = Field(
+        description="Sum of counts in top_event_ips (each ≤ events_in_window)",
+    )
+    top_ips_counts_valid: bool = Field(
+        description="True when top_event_ip_rows_sum ≤ events_in_window",
+    )
