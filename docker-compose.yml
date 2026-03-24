@@ -1,0 +1,65 @@
+services:
+  postgres:
+    image: postgres:16
+    container_name: sentinelstack-postgres
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  logging-service:
+    build:
+      context: ./services/logging-service
+    container_name: sentinelstack-logging-service
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    expose:
+      - "8000"
+
+  demo-app:
+    build:
+      context: ./services/demo-app
+    container_name: sentinelstack-demo-app
+    env_file:
+      - .env
+    depends_on:
+      - logging-service
+    expose:
+      - "8000"
+
+  frontend:
+    build:
+      context: ./frontend
+    container_name: sentinelstack-frontend
+    env_file:
+      - .env
+    depends_on:
+      - logging-service
+    expose:
+      - "3000"
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: sentinelstack-nginx
+    depends_on:
+      - demo-app
+      - logging-service
+      - frontend
+    ports:
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+
+volumes:
+  postgres_data:
