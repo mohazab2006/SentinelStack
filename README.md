@@ -2,7 +2,7 @@
 
 **Dockerized security monitoring lab** — request logging, rule + behavioral scoring, alerts, optional IP blocks, internal port-change detection, and a Next.js analyst dashboard.
 
-Good for showing end-to-end “build something SOC-shaped”: ingest → detect → persist → visualize, with clear service boundaries.
+It implements an end-to-end SOC-style pipeline — **ingest → detect → persist → visualize** — with each stage in its own service.
 
 ## Stack
 
