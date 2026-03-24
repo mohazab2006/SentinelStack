@@ -1,11 +1,20 @@
 import os
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 
 from .db import close_pool, get_pool
-from .schemas import Alert, BlockedIp, BlockIpRequest, IngestRequest, RequestLog, ThreatEvent
+from .schemas import (
+    Alert,
+    BlockedIp,
+    BlockIpRequest,
+    IngestRequest,
+    PortguardIngestRequest,
+    PortguardNewPortItem,
+    RequestLog,
+    ThreatEvent,
+)
 
 app = FastAPI(title="SentinelStack Logging Service")
 
@@ -32,6 +41,8 @@ LOW_MAX = env_int("LOW_MAX", 29)
 MEDIUM_MAX = env_int("MEDIUM_MAX", 59)
 HIGH_MAX = env_int("HIGH_MAX", 79)
 AUTO_BLOCK_MINUTES = env_int("AUTO_BLOCK_MINUTES", 60)
+PORTGUARD_WEBHOOK_SECRET = os.getenv("PORTGUARD_WEBHOOK_SECRET", "").strip()
+PORTGUARD_ALERT_DEDUPE_MINUTES = env_int("PORTGUARD_ALERT_DEDUPE_MINUTES", 45)
 
 
 @app.on_event("startup")
@@ -201,6 +212,96 @@ async def ingest_request(payload: IngestRequest) -> dict[str, str]:
                         duration_minutes=AUTO_BLOCK_MINUTES,
                     )
     return {"status": "logged"}
+
+
+def _portguard_items_score(items: List[PortguardNewPortItem]) -> int:
+    score = 0
+    for p in items:
+        r = (p.risk_level or "LOW").upper()
+        if r == "CRITICAL":
+            score = max(score, 90)
+        elif r == "HIGH":
+            score = max(score, 70)
+        elif r == "MEDIUM":
+            score = max(score, 45)
+        else:
+            score = max(score, 30)
+    return min(score, 100)
+
+
+def _portguard_reasons_line(items: List[PortguardNewPortItem]) -> str:
+    parts: list[str] = []
+    for p in sorted(items, key=lambda x: x.port):
+        svc = p.service or "unknown"
+        parts.append(f"{p.port}/{svc}/{p.risk_level}")
+    return "new open ports: " + "; ".join(parts)
+
+
+@app.post("/ingest-portguard")
+async def ingest_portguard(
+    payload: PortguardIngestRequest,
+    x_portguard_token: Annotated[Optional[str], Header(alias="X-Portguard-Token")] = None,
+) -> dict[str, str]:
+    if PORTGUARD_WEBHOOK_SECRET and x_portguard_token != PORTGUARD_WEBHOOK_SECRET:
+        raise HTTPException(status_code=401, detail="Invalid or missing X-Portguard-Token")
+
+    rule_score = _portguard_items_score(payload.new_ports)
+    severity = score_to_severity(rule_score)
+    ports_line = _portguard_reasons_line(payload.new_ports)
+    reasons = f"target={payload.target} | {ports_line}"
+    pseudo_ip = f"portguard:{payload.target}"[:64]
+    event_type = "portguard_new_ports"
+
+    pool = await get_pool()
+    async with pool.acquire() as conn, conn.transaction():
+        duplicate = await conn.fetchval(
+            """
+            SELECT id FROM threat_events
+            WHERE ip_address = $1
+              AND event_type = $2
+              AND reasons = $3
+              AND created_at >= NOW() - ($4::TEXT || ' minutes')::INTERVAL
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            pseudo_ip,
+            event_type,
+            reasons,
+            str(PORTGUARD_ALERT_DEDUPE_MINUTES),
+        )
+        if duplicate is not None:
+            return {"status": "deduped"}
+
+        event_id = await conn.fetchval(
+            """
+            INSERT INTO threat_events (ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons)
+            VALUES ($1, $2, $3, 0, $3, $4, $5)
+            RETURNING id
+            """,
+            pseudo_ip,
+            event_type,
+            rule_score,
+            severity,
+            reasons,
+        )
+        if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
+            message = (
+                f"{severity} Port Guard: newly open ports on {payload.target} (scan {payload.scan_id}) — "
+                + "; ".join(
+                    f"{p.port} ({p.service or 'unknown'}, {p.risk_level})"
+                    for p in sorted(payload.new_ports, key=lambda x: x.port)
+                )
+            )
+            await conn.execute(
+                """
+                INSERT INTO alerts (threat_event_id, severity, message)
+                VALUES ($1, $2, $3)
+                """,
+                event_id,
+                severity,
+                message,
+            )
+    return {"status": "recorded"}
 
 
 @app.get("/logs", response_model=List[RequestLog])

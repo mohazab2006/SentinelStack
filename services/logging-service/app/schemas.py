@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -59,3 +59,15 @@ class BlockIpRequest(BaseModel):
     ip_address: str
     reason: str = "manual block"
     duration_minutes: Optional[int] = Field(default=60, ge=1, le=10080)
+
+
+class PortguardNewPortItem(BaseModel):
+    port: int
+    service: Optional[str] = None
+    risk_level: str
+
+
+class PortguardIngestRequest(BaseModel):
+    target: str = Field(..., min_length=1, max_length=256)
+    scan_id: int = Field(..., ge=1)
+    new_ports: List[PortguardNewPortItem] = Field(..., min_length=1)

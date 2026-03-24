@@ -27,6 +27,20 @@ services:
     expose:
       - "8000"
 
+  portguard-service:
+    build:
+      context: ./services/portguard-service
+    container_name: sentinelstack-portguard-service
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      logging-service:
+        condition: service_started
+    expose:
+      - "8000"
+
   demo-app:
     build:
       context: ./services/demo-app
@@ -46,6 +60,7 @@ services:
       - .env
     depends_on:
       - logging-service
+      - portguard-service
     expose:
       - "3000"
 
@@ -55,6 +70,7 @@ services:
     depends_on:
       - demo-app
       - logging-service
+      - portguard-service
       - frontend
     ports:
       - "8080:80"

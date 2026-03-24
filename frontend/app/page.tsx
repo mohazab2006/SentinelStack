@@ -1,4 +1,5 @@
 import OperationsPanel from "./components/OperationsPanel";
+import PortGuardSection from "./components/PortGuardSection";
 
 type RequestLog = {
   id: number;
@@ -55,6 +56,21 @@ type SeverityMetrics = {
   CRITICAL: number;
 };
 
+type OpenPortSummary = {
+  port: number;
+  service: string | null;
+  risk_level: string;
+};
+
+type PortScanSummary = {
+  id: number;
+  target: string;
+  scanned_at: string;
+  open_count: number;
+  high_risk_count: number;
+  open_ports?: OpenPortSummary[];
+};
+
 const numberFormatter = new Intl.NumberFormat();
 
 function formatDateTime(value: string) {
@@ -67,6 +83,21 @@ function formatNumber(value: number) {
 
 const apiBase =
   process.env.LOGGING_API_BASE_URL || "http://logging-service:8000";
+
+const portguardApiBase =
+  process.env.PORTGUARD_API_BASE_URL || "http://portguard-service:8000";
+
+function parseAllowedTargets(): string[] {
+  const raw = process.env.PORTGUARD_ALLOWED_TARGETS || "demo-app,nginx,postgres,logging-service";
+  return raw
+    .split(",")
+    .map((t) => t.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function defaultPortguardTarget(): string {
+  return (process.env.PORTGUARD_DEFAULT_TARGET || "demo-app").trim().toLowerCase();
+}
 
 async function getLogs(): Promise<RequestLog[]> {
   const response = await fetch(`${apiBase}/logs?limit=50`, {
@@ -128,6 +159,16 @@ async function getSeverityMetrics(): Promise<SeverityMetrics> {
   return response.json();
 }
 
+async function getPortScans(): Promise<PortScanSummary[]> {
+  const response = await fetch(`${portguardApiBase}/scans?limit=15`, {
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new Error("Failed to load port scans");
+  }
+  return response.json();
+}
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
     return error.message;
@@ -136,14 +177,22 @@ function getErrorMessage(error: unknown) {
 }
 
 export default async function HomePage() {
-  const [logsResult, alertsResult, eventsResult, blockedIpsResult, overviewResult, severityResult] =
-    await Promise.allSettled([
+  const [
+    logsResult,
+    alertsResult,
+    eventsResult,
+    blockedIpsResult,
+    overviewResult,
+    severityResult,
+    portScansResult
+  ] = await Promise.allSettled([
     getLogs(),
     getAlerts(),
     getEvents(),
     getBlockedIps(),
     getOverviewMetrics(),
-    getSeverityMetrics()
+    getSeverityMetrics(),
+    getPortScans()
   ]);
 
   const loadErrors: string[] = [];
@@ -196,6 +245,14 @@ export default async function HomePage() {
     loadErrors.push(`Severity metrics unavailable: ${getErrorMessage(severityResult.reason)}`);
   }
 
+  const portScans = portScansResult.status === "fulfilled" ? portScansResult.value : [];
+  if (portScansResult.status === "rejected") {
+    loadErrors.push(`Port Guard unavailable: ${getErrorMessage(portScansResult.reason)}`);
+  }
+
+  const allowedTargets = parseAllowedTargets();
+  const portguardDefaultTarget = defaultPortguardTarget();
+
   const metrics = [
     { label: "Total Requests", value: overview.total_requests, tone: "neutral" },
     { label: "Threat Events", value: overview.total_events, tone: "warn" },
@@ -211,7 +268,6 @@ export default async function HomePage() {
     <main className="dashboard-page">
       <header className="dashboard-header">
         <h1>SentinelStack Dashboard</h1>
-        <p>Milestone 3: detection with alerts and automated response actions.</p>
       </header>
       {loadErrors.length > 0 ? (
         <section className="card load-warning" aria-live="polite">
@@ -235,6 +291,12 @@ export default async function HomePage() {
       </section>
 
       <OperationsPanel alerts={alerts} blockedIps={blockedIps} />
+
+      <PortGuardSection
+        scans={portScans}
+        allowedTargets={allowedTargets}
+        defaultTarget={portguardDefaultTarget}
+      />
 
       <section className="card">
         <div className="card-header">
