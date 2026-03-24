@@ -1,8 +1,8 @@
 # SentinelStack
 
-**Dockerized security monitoring lab** — request logging, rule + behavioral scoring, alerts, IP blocks (auto + manual), internal port-change detection, a Next.js analyst dashboard, and **LLM-assisted triage** layered on deterministic scoring.
+**Dockerized security monitoring lab** that wires together request logging, hybrid detection (rules plus lightweight behavioral scoring), alerting, IP blocking, internal port drift detection, a Next.js operations dashboard, and **LLM-assisted triage** on top of deterministic scoring.
 
-It implements an end-to-end SOC-style pipeline — **ingest → detect → persist → visualize** — with each stage in its own service.
+The design is an end-to-end SOC-style pipeline, **ingest → detect → persist → visualize**, with **clear service boundaries** so each concern stays testable and replaceable.
 
 ---
 
@@ -10,12 +10,12 @@ It implements an end-to-end SOC-style pipeline — **ingest → detect → persi
 
 | Piece | Role |
 | :--- | :--- |
-| **Next.js** | Dashboard: metrics, alerts, events, blocks, Port Guard, CSV export |
-| **nginx** | Single entry (`:8080`), routes to UI + APIs |
-| **FastAPI (logging)** | Ingest, scoring (rules + anomaly), events, alerts, blocks, summaries, OpenAI-backed enrichment |
-| **FastAPI (demo-app)** | Sample app that emits traffic into the pipeline |
-| **FastAPI (portguard)** | Scheduled / on-demand TCP probes of allowlisted hosts; webhooks new open ports |
-| **Postgres** | Logs, events, alerts, blocks, scans, schedule prefs |
+| **Next.js** | Operator dashboard: metrics, filtered lists, Port Guard, CSV export, refresh controls |
+| **nginx** | Single public entry (`:8080`), reverse proxy to UI and APIs |
+| **FastAPI (logging)** | Ingest, scoring pipeline, threat events, alerts, block list, rollups, OpenAI-backed enrichment |
+| **FastAPI (demo-app)** | Reference workload that forwards telemetry into the logging API |
+| **FastAPI (portguard)** | Allowlisted TCP discovery, scan history, scheduled sweeps, webhooks for newly open ports |
+| **Postgres** | Durable store for logs, events, alerts, blocks, scan results, persisted schedule preferences |
 
 ---
 
@@ -23,32 +23,33 @@ It implements an end-to-end SOC-style pipeline — **ingest → detect → persi
 
 ### Detection
 
-- Watches for risky patterns: e.g. many failed logins, traffic spikes, odd URL / status mix.
-- Merges **rule-based signals** with a small **behavioral / anomaly** layer.
-- Produces a **score** and **severity** for each threat event.
+- Correlates noisy HTTP telemetry into **coherent signals**: credential abuse, volume anomalies, recon-style paths and status patterns.
+- Layers **explicit thresholds** with a capped **anomaly contribution** so scoring stays explainable and bounded.
+- Every evaluated episode gets a numeric **score**, a **severity** band, and structured **reasons** suitable for review and automation.
 
 ### Response
 
-- Raises **alerts** from higher scores.
-- **Critical** → can **auto-block** the source IP.
-- **Lower severities** → **manual block** from the dashboard.
-- **Port Guard** → alerts when **new ports** appear on scanned internal targets.
+- Promotes high-confidence outcomes to **alerts** with full traceability back to the underlying event.
+- **Critical** paths can **automatically block** the offending source IP for a configurable window.
+- **Sub-critical** cases support **operator-driven blocks** directly from the dashboard.
+- **Port Guard** compares successive scans and surfaces **newly exposed listeners** on internal targets as first-class findings.
 
 ### AI (OpenAI)
 
-- Adds (per new alert, one round-trip): **plain-English summary**, **advisory 0–100 score**, **suggested next steps** — stored and shown in the UI.
-- **Severity and blocking** still come from **rules + anomaly** (not the model).
-- Configure in **`.env`**: API key, toggles per AI field, optional **auto-ack** for very low AI scores.
+- Enriches qualifying alerts in **one structured completion**: narrative context, an **advisory 0 to 100** risk read (independent of the stack score), and **actionable recommendations**, persisted and rendered beside traditional fields.
+- **Severity, blocking, and policy** remain owned by **rules and anomaly math**; the model is advisory unless you wire explicit automation (for example low-score auto-ack).
+- Behavior is **fully driven by `.env`**: credentials, model id, per-feature toggles, and optional acknowledgment thresholds.
 
 ### Dashboard
 
-- **Metrics**, **alerts**, **events** (with severity filters).
-- **Activity summary** (1h / 24h) plus quick **sanity checks** on the numbers.
+- Unified view of **live posture**: request and event volume, alert backlog, active blocks, Port Guard history.
+- **Activity summary** windows (1 hour / 24 hours) include **consistency hints** so operators can sanity-check rollups at a glance.
+- **Severity filters** keep long-running triage sessions focused.
 
 ### Ops
 
-- **Pause** or change **auto-refresh** interval on the dashboard.
-- **`scripts/validate_stack.ps1`** — prints summary health from the API.
+- **Pause or retune** full-page auto-refresh without redeploying.
+- **`scripts/validate_stack.ps1`**: lightweight smoke against the metrics summary API for demos and CI-style checks.
 
 ---
 
@@ -60,7 +61,7 @@ docker compose up --build -d
 
 | Step | Action |
 | :--- | :--- |
-| 1 | Open **http://localhost:8080** |
-| 2 | Stop with `docker compose down` |
-| 3 | Copy **`.env.example`** → **`.env`** |
-| 4 | Set **`OPENAI_API_KEY`** for LLM triage; see `.env.example` for model name, AI toggles, and `AI_AUTO_ACK_WHEN_AI_SCORE_LE` |
+| 1 | Browse **http://localhost:8080** |
+| 2 | Tear down with `docker compose down` |
+| 3 | Copy **`.env.example`** to **`.env`** and adjust secrets |
+| 4 | Provide **`OPENAI_API_KEY`** for LLM features; `.env.example` documents model selection, AI flags, and **`AI_AUTO_ACK_WHEN_AI_SCORE_LE`** |
