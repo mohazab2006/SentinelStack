@@ -11,11 +11,20 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from fastapi import FastAPI, HTTPException
 
 from app.db import close_pool, get_pool
-from app.schemas import PortResult, PortScanDetail, PortScanSummary, ScanRequest
+from app.schemas import (
+    PortResult,
+    PortScanDetail,
+    PortScanSummary,
+    ScanRequest,
+    ScheduleStatus,
+    ScheduleUpdateRequest,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
 _scheduler: Optional[AsyncIOScheduler] = None
+_schedule_minutes: int = 60
+_schedule_targets_override: Optional[List[str]] = None
 
 
 def _coerce_open_ports(raw: object) -> List[dict]:
@@ -164,6 +173,9 @@ app = FastAPI(title="SentinelStack Port Guard", version="0.1.0")
 
 
 def _schedule_targets() -> List[str]:
+    global _schedule_targets_override
+    if _schedule_targets_override is not None:
+        return list(_schedule_targets_override)
     raw = os.environ.get("PORTGUARD_SCHEDULE_TARGETS", "").strip()
     allowed = _allowed_targets()
     if not raw:
@@ -327,33 +339,65 @@ async def _scheduled_sweep() -> None:
             logger.exception("scheduled scan failed for %s", t)
 
 
-@app.on_event("startup")
-async def startup() -> None:
-    global _scheduler
-    await migrate()
-    raw = os.getenv("PORTGUARD_SCHEDULE_ENABLED", "").lower()
-    if raw in ("1", "true", "yes"):
-        try:
-            minutes = int(os.getenv("PORTGUARD_SCHEDULE_MINUTES", "60"))
-        except ValueError:
-            minutes = 60
-        minutes = max(1, min(minutes, 1440))
-        _scheduler = AsyncIOScheduler()
-        _scheduler.add_job(_scheduled_sweep, "interval", minutes=minutes, id="portguard_scheduled")
-        _scheduler.start()
-        logger.info(
-            "Port Guard scheduler: every %s min, targets=%s",
-            minutes,
-            _schedule_targets() or "(none)",
-        )
+def _parse_schedule_minutes(raw_minutes: Optional[str] = None) -> int:
+    try:
+        minutes = int(raw_minutes if raw_minutes is not None else os.getenv("PORTGUARD_SCHEDULE_MINUTES", "60"))
+    except (TypeError, ValueError):
+        minutes = 60
+    return max(1, min(minutes, 1440))
 
 
-@app.on_event("shutdown")
-async def shutdown() -> None:
+def _scheduler_enabled() -> bool:
+    return _scheduler is not None and _scheduler.running
+
+
+def _start_scheduler(minutes: int) -> None:
+    global _scheduler, _schedule_minutes
+    _schedule_minutes = max(1, min(minutes, 1440))
+    if _scheduler is not None:
+        _scheduler.shutdown(wait=False)
+        _scheduler = None
+    _scheduler = AsyncIOScheduler()
+    _scheduler.add_job(_scheduled_sweep, "interval", minutes=_schedule_minutes, id="portguard_scheduled")
+    _scheduler.start()
+    logger.info(
+        "Port Guard scheduler: every %s min, targets=%s",
+        _schedule_minutes,
+        _schedule_targets() or "(none)",
+    )
+
+
+def _stop_scheduler() -> None:
     global _scheduler
     if _scheduler is not None:
         _scheduler.shutdown(wait=False)
         _scheduler = None
+    logger.info("Port Guard scheduler stopped")
+
+
+def _normalize_schedule_targets(targets: List[str]) -> List[str]:
+    allowed = _allowed_targets()
+    normalized = []
+    for t in targets:
+        item = t.strip().lower()
+        if item in allowed and item not in normalized:
+            normalized.append(item)
+    return normalized
+
+
+@app.on_event("startup")
+async def startup() -> None:
+    global _schedule_minutes
+    await migrate()
+    _schedule_minutes = _parse_schedule_minutes()
+    raw = os.getenv("PORTGUARD_SCHEDULE_ENABLED", "").lower()
+    if raw in ("1", "true", "yes"):
+        _start_scheduler(_schedule_minutes)
+
+
+@app.on_event("shutdown")
+async def shutdown() -> None:
+    _stop_scheduler()
     await close_pool()
 
 
@@ -366,6 +410,43 @@ async def health() -> dict:
 async def run_scan(body: ScanRequest) -> PortScanDetail:
     target = (body.target or _default_target()).strip().lower()
     return await perform_scan(target)
+
+
+@app.get("/schedule", response_model=ScheduleStatus)
+async def get_schedule() -> ScheduleStatus:
+    return ScheduleStatus(
+        enabled=_scheduler_enabled(),
+        minutes=_schedule_minutes,
+        targets=_schedule_targets(),
+        allowed_targets=sorted(_allowed_targets()),
+    )
+
+
+@app.put("/schedule", response_model=ScheduleStatus)
+async def update_schedule(body: ScheduleUpdateRequest) -> ScheduleStatus:
+    global _schedule_minutes, _schedule_targets_override
+    if body.minutes is not None:
+        _schedule_minutes = max(1, min(body.minutes, 1440))
+    if body.targets is not None:
+        normalized_targets = _normalize_schedule_targets(body.targets)
+        if not normalized_targets:
+            raise HTTPException(status_code=400, detail="Choose at least one valid schedule target")
+        _schedule_targets_override = normalized_targets
+
+    if body.enabled is True:
+        _start_scheduler(_schedule_minutes)
+    elif body.enabled is False:
+        _stop_scheduler()
+    elif _scheduler_enabled():
+        # Apply minute changes immediately when running.
+        _start_scheduler(_schedule_minutes)
+
+    return ScheduleStatus(
+        enabled=_scheduler_enabled(),
+        minutes=_schedule_minutes,
+        targets=_schedule_targets(),
+        allowed_targets=sorted(_allowed_targets()),
+    )
 
 
 async def _fetch_results_for_scan(scan_id: int) -> List[PortResult]:

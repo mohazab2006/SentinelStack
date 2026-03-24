@@ -42,3 +42,16 @@ class PortScanDetail(BaseModel):
     scanned_at: datetime
     results: List[PortResult]
     new_open_ports: List[int] = Field(default_factory=list)
+
+
+class ScheduleStatus(BaseModel):
+    enabled: bool
+    minutes: int
+    targets: List[str] = Field(default_factory=list)
+    allowed_targets: List[str] = Field(default_factory=list)
+
+
+class ScheduleUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+    minutes: Optional[int] = Field(default=None, ge=1, le=1440)
+    targets: Optional[List[str]] = None

@@ -1,5 +1,6 @@
 import OperationsPanel from "./components/OperationsPanel";
 import PortGuardSection from "./components/PortGuardSection";
+import AutoRefresh from "./components/AutoRefresh";
 
 type RequestLog = {
   id: number;
@@ -69,6 +70,13 @@ type PortScanSummary = {
   open_count: number;
   high_risk_count: number;
   open_ports?: OpenPortSummary[];
+};
+
+type PortguardScheduleStatus = {
+  enabled: boolean;
+  minutes: number;
+  targets: string[];
+  allowed_targets: string[];
 };
 
 const numberFormatter = new Intl.NumberFormat();
@@ -169,6 +177,16 @@ async function getPortScans(): Promise<PortScanSummary[]> {
   return response.json();
 }
 
+async function getPortguardSchedule(): Promise<PortguardScheduleStatus> {
+  const response = await fetch(`${portguardApiBase}/schedule`, {
+    cache: "no-store"
+  });
+  if (!response.ok) {
+    throw new Error("Failed to load Port Guard schedule");
+  }
+  return response.json();
+}
+
 function getErrorMessage(error: unknown) {
   if (error instanceof Error) {
     return error.message;
@@ -184,7 +202,8 @@ export default async function HomePage() {
     blockedIpsResult,
     overviewResult,
     severityResult,
-    portScansResult
+    portScansResult,
+    portguardScheduleResult
   ] = await Promise.allSettled([
     getLogs(),
     getAlerts(),
@@ -192,7 +211,8 @@ export default async function HomePage() {
     getBlockedIps(),
     getOverviewMetrics(),
     getSeverityMetrics(),
-    getPortScans()
+    getPortScans(),
+    getPortguardSchedule()
   ]);
 
   const loadErrors: string[] = [];
@@ -249,6 +269,13 @@ export default async function HomePage() {
   if (portScansResult.status === "rejected") {
     loadErrors.push(`Port Guard unavailable: ${getErrorMessage(portScansResult.reason)}`);
   }
+  const portguardSchedule =
+    portguardScheduleResult.status === "fulfilled"
+      ? portguardScheduleResult.value
+      : { enabled: false, minutes: 60, targets: [], allowed_targets: [] };
+  if (portguardScheduleResult.status === "rejected") {
+    loadErrors.push(`Port Guard schedule unavailable: ${getErrorMessage(portguardScheduleResult.reason)}`);
+  }
 
   const allowedTargets = parseAllowedTargets();
   const portguardDefaultTarget = defaultPortguardTarget();
@@ -266,6 +293,7 @@ export default async function HomePage() {
 
   return (
     <main className="dashboard-page">
+      <AutoRefresh intervalMs={10000} />
       <header className="dashboard-header">
         <h1>SentinelStack Dashboard</h1>
       </header>
@@ -296,6 +324,7 @@ export default async function HomePage() {
         scans={portScans}
         allowedTargets={allowedTargets}
         defaultTarget={portguardDefaultTarget}
+        schedule={portguardSchedule}
       />
 
       <section className="card">

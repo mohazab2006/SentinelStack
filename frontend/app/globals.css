@@ -300,6 +300,14 @@ tbody tr:hover {
   margin-bottom: 14px;
 }
 
+.portguard-schedule {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
 .portguard-label {
   display: flex;
   flex-direction: column;
@@ -310,9 +318,55 @@ tbody tr:hover {
   letter-spacing: 0.04em;
 }
 
+.portguard-status-text {
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.86rem;
+  color: #c6d5e6;
+}
+
+.portguard-targets {
+  margin: 0 0 12px;
+}
+
+.portguard-targets-title {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 0.82rem;
+  color: #9fb4cc;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.portguard-targets-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.portguard-target-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: #101b2f;
+  border: 1px solid #22314d;
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
 .portguard-select {
   appearance: none;
   min-width: 180px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid #355587;
+  background: #0f1829;
+  color: #e6edf3;
+  font-size: 0.95rem;
+}
+
+.portguard-input {
+  width: 130px;
   padding: 8px 10px;
   border-radius: 8px;
   border: 1px solid #355587;
