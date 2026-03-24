@@ -1,9 +1,11 @@
 import { Suspense } from "react";
 import OperationsPanel from "./components/OperationsPanel";
 import PortGuardSection from "./components/PortGuardSection";
-import AutoRefresh from "./components/AutoRefresh";
+import DashboardRefreshBar from "./components/DashboardRefreshBar";
 import SummaryPanel from "./components/SummaryPanel";
 import TableSeverityFilters from "./components/TableSeverityFilters";
+import DataExportButtons from "./components/DataExportButtons";
+import IpBlockButton from "./components/IpBlockButton";
 
 type RequestLog = {
   id: number;
@@ -23,6 +25,9 @@ type Alert = {
   message: string;
   created_at: string;
   acknowledged: boolean;
+  source_ip: string;
+  ai_advisory_score?: number | null;
+  ai_recommendations?: string | null;
 };
 
 type ThreatEvent = {
@@ -35,6 +40,8 @@ type ThreatEvent = {
   severity: "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
   reasons: string;
   created_at: string;
+  ai_advisory_score?: number | null;
+  ai_recommendations?: string | null;
 };
 
 type BlockedIp = {
@@ -70,6 +77,7 @@ type PortScanSummary = {
   id: number;
   target: string;
   scanned_at: string;
+  duration_ms?: number | null;
   open_count: number;
   high_risk_count: number;
   open_ports?: OpenPortSummary[];
@@ -80,6 +88,7 @@ type PortguardScheduleStatus = {
   minutes: number;
   targets: string[];
   allowed_targets: string[];
+  last_background_run_at?: string | null;
 };
 
 const numberFormatter = new Intl.NumberFormat();
@@ -274,6 +283,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   if (blockedIpsResult.status === "rejected") {
     loadErrors.push(`Blocked IPs unavailable: ${getErrorMessage(blockedIpsResult.reason)}`);
   }
+  const activeBlockedIpList = blockedIps.map((b) => b.ip_address);
 
   const overview =
     overviewResult.status === "fulfilled"
@@ -308,7 +318,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   const portguardSchedule =
     portguardScheduleResult.status === "fulfilled"
       ? portguardScheduleResult.value
-      : { enabled: false, minutes: 60, targets: [], allowed_targets: [] };
+      : { enabled: false, minutes: 60, targets: [], allowed_targets: [], last_background_run_at: null };
   if (portguardScheduleResult.status === "rejected") {
     loadErrors.push(`Port Guard schedule unavailable: ${getErrorMessage(portguardScheduleResult.reason)}`);
   }
@@ -329,9 +339,9 @@ export default async function HomePage({ searchParams }: HomePageProps) {
 
   return (
     <main className="dashboard-page">
-      <AutoRefresh intervalMs={10000} />
       <header className="dashboard-header">
         <h1>SentinelStack Dashboard</h1>
+        <DashboardRefreshBar />
       </header>
       {loadErrors.length > 0 ? (
         <section className="card load-warning" aria-live="polite">
@@ -369,6 +379,8 @@ export default async function HomePage({ searchParams }: HomePageProps) {
         <TableSeverityFilters />
       </Suspense>
 
+      <DataExportButtons alertSeverity={alertSeverity} eventSeverity={eventSeverity} />
+
       <section className="card">
         <div className="card-header">
           <h2>Recent Alerts</h2>
@@ -379,16 +391,20 @@ export default async function HomePage({ searchParams }: HomePageProps) {
             <thead>
               <tr>
                 <th>Time</th>
+                <th>Source IP</th>
                 <th>Severity</th>
                 <th>Score</th>
+                <th>AI advisory</th>
                 <th>Message</th>
+                <th>AI actions</th>
+                <th>Block</th>
                 <th>Status</th>
               </tr>
             </thead>
             <tbody>
               {alerts.length === 0 ? (
                 <tr>
-                  <td colSpan={5} className="empty-cell">
+                  <td colSpan={9} className="empty-cell">
                     No alerts yet.
                   </td>
                 </tr>
@@ -396,16 +412,32 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                 alerts.map((alert) => (
                   (() => {
                     const event = eventById.get(alert.threat_event_id);
+                    const aiScore = alert.ai_advisory_score ?? event?.ai_advisory_score;
+                    const aiRecs = alert.ai_recommendations ?? event?.ai_recommendations;
                     return (
                   <tr key={alert.id}>
                     <td>{formatDateTime(alert.created_at)}</td>
+                    <td className="mono">{alert.source_ip}</td>
                     <td>
                       <span className={`severity severity-${alert.severity.toLowerCase()}`}>
                         {alert.severity}
                       </span>
                     </td>
                     <td className="mono">{event ? event.final_score : "n/a"}</td>
+                    <td className="mono">
+                      {aiScore != null ? aiScore : "—"}
+                    </td>
                     <td>{alert.message}</td>
+                    <td className="ai-recs-cell">{aiRecs ?? "—"}</td>
+                    <td>
+                      <IpBlockButton
+                        ipAddress={alert.source_ip}
+                        severity={alert.severity}
+                        context="alert"
+                        contextId={alert.id}
+                        activeBlockedIps={activeBlockedIpList}
+                      />
+                    </td>
                     <td>
                       <span className={`status-chip ${alert.acknowledged ? "status-ok" : "status-open"}`}>
                         {alert.acknowledged ? "acknowledged" : "open"}
@@ -437,13 +469,16 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                 <th>Rule</th>
                 <th>Anomaly</th>
                 <th>Final</th>
+                <th>AI adv.</th>
                 <th>Why</th>
+                <th>AI actions</th>
+                <th>Block</th>
               </tr>
             </thead>
             <tbody>
               {events.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="empty-cell">
+                  <td colSpan={11} className="empty-cell">
                     No threat events yet.
                   </td>
                 </tr>
@@ -461,7 +496,18 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                     <td className="mono">{event.rule_score}</td>
                     <td className="mono">{event.anomaly_score}</td>
                     <td className="mono">{event.final_score}</td>
+                    <td className="mono">{event.ai_advisory_score ?? "—"}</td>
                     <td>{event.reasons}</td>
+                    <td className="ai-recs-cell">{event.ai_recommendations ?? "—"}</td>
+                    <td>
+                      <IpBlockButton
+                        ipAddress={event.ip_address}
+                        severity={event.severity}
+                        context="event"
+                        contextId={event.id}
+                        activeBlockedIps={activeBlockedIpList}
+                      />
+                    </td>
                   </tr>
                 ))
               )}

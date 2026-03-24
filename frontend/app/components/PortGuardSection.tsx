@@ -12,6 +12,7 @@ type PortScanSummary = {
   id: number;
   target: string;
   scanned_at: string;
+  duration_ms?: number | null;
   open_count: number;
   high_risk_count: number;
   open_ports?: OpenPortSummary[];
@@ -22,6 +23,7 @@ type PortguardScheduleStatus = {
   minutes: number;
   targets: string[];
   allowed_targets: string[];
+  last_background_run_at?: string | null;
 };
 
 function riskTone(risk: string): string {
@@ -57,6 +59,9 @@ export default function PortGuardSection({ scans, allowedTargets, defaultTarget,
   const [scheduleTargets, setScheduleTargets] = useState<string[]>(
     schedule.targets.length > 0 ? schedule.targets : allowedTargets
   );
+  const [lastBackgroundRunAt, setLastBackgroundRunAt] = useState<string | null>(
+    schedule.last_background_run_at ?? null
+  );
 
   const refreshPortguard = useCallback(async () => {
     try {
@@ -73,6 +78,7 @@ export default function PortGuardSection({ scans, allowedTargets, defaultTarget,
         setScheduleEnabled(nextSchedule.enabled);
         setScheduleMinutes(String(nextSchedule.minutes));
         setScheduleTargets(nextSchedule.targets);
+        setLastBackgroundRunAt(nextSchedule.last_background_run_at ?? null);
       }
     } catch {
       // Ignore polling errors to avoid noisy UI while services restart.
@@ -82,6 +88,10 @@ export default function PortGuardSection({ scans, allowedTargets, defaultTarget,
   useEffect(() => {
     setLiveScans(scans);
   }, [scans]);
+
+  useEffect(() => {
+    setLastBackgroundRunAt(schedule.last_background_run_at ?? null);
+  }, [schedule.last_background_run_at]);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -199,6 +209,12 @@ export default function PortGuardSection({ scans, allowedTargets, defaultTarget,
         are highlighted after each run.
       </p>
       <div className="portguard-schedule">
+        <p className="portguard-last-run">
+          <span className="portguard-last-run-label">Last background sweep</span>
+          <span className="mono">
+            {lastBackgroundRunAt ? formatDateTime(lastBackgroundRunAt) : "— (none yet)"}
+          </span>
+        </p>
         <label className="portguard-label">
           Background scan
           <span className="portguard-status-text">
@@ -277,6 +293,7 @@ export default function PortGuardSection({ scans, allowedTargets, defaultTarget,
             <tr>
               <th>Time</th>
               <th>Target</th>
+              <th>Duration</th>
               <th>Open</th>
               <th>High / critical</th>
               <th>Open ports</th>
@@ -285,7 +302,7 @@ export default function PortGuardSection({ scans, allowedTargets, defaultTarget,
           <tbody>
             {liveScans.length === 0 ? (
               <tr>
-                <td colSpan={5} className="empty-cell">
+                <td colSpan={6} className="empty-cell">
                   No scans yet. Run a scan to populate history.
                 </td>
               </tr>
@@ -296,6 +313,9 @@ export default function PortGuardSection({ scans, allowedTargets, defaultTarget,
                 <tr key={s.id}>
                   <td>{formatDateTime(s.scanned_at)}</td>
                   <td className="mono">{s.target}</td>
+                  <td className="mono" title="Wall time for TCP probes + DB write for this target">
+                    {s.duration_ms != null ? `${s.duration_ms} ms` : "—"}
+                  </td>
                   <td className="mono">{s.open_count}</td>
                   <td className="mono">{s.high_risk_count}</td>
                   <td className="portguard-ports-cell">

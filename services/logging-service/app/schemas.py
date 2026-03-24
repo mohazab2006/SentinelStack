@@ -35,6 +35,8 @@ class ThreatEvent(BaseModel):
     severity: str
     reasons: str
     created_at: datetime
+    ai_advisory_score: Optional[int] = None
+    ai_recommendations: Optional[str] = None
 
 
 class Alert(BaseModel):
@@ -44,6 +46,9 @@ class Alert(BaseModel):
     message: str
     created_at: datetime
     acknowledged: bool
+    source_ip: str
+    ai_advisory_score: Optional[int] = None
+    ai_recommendations: Optional[str] = None
 
 
 class BlockedIp(BaseModel):

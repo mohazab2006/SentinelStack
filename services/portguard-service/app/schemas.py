@@ -31,6 +31,10 @@ class PortScanSummary(BaseModel):
     id: int
     target: str
     scanned_at: datetime
+    duration_ms: Optional[int] = Field(
+        default=None,
+        description="Wall-clock scan duration in milliseconds (probe phase)",
+    )
     open_count: int
     high_risk_count: int
     open_ports: List[OpenPortSummary] = Field(default_factory=list)
@@ -49,6 +53,10 @@ class ScheduleStatus(BaseModel):
     minutes: int
     targets: List[str] = Field(default_factory=list)
     allowed_targets: List[str] = Field(default_factory=list)
+    last_background_run_at: Optional[datetime] = Field(
+        default=None,
+        description="When the last scheduled multi-target sweep finished (best effort)",
+    )
 
 
 class ScheduleUpdateRequest(BaseModel):

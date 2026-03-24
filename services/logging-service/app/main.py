@@ -4,7 +4,7 @@ from typing import Annotated, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Query
 
-from .ai_explain import optional_alert_explanation
+from .ai_insights import AlertAiBundle, fetch_alert_ai_bundle
 from .anomaly import compute_anomaly
 from .db import close_pool, get_pool
 from .schemas import (
@@ -49,6 +49,24 @@ PORTGUARD_WEBHOOK_SECRET = os.getenv("PORTGUARD_WEBHOOK_SECRET", "").strip()
 PORTGUARD_ALERT_DEDUPE_MINUTES = env_int("PORTGUARD_ALERT_DEDUPE_MINUTES", 45)
 
 _SEVERITY_LEVELS = frozenset({"LOW", "MEDIUM", "HIGH", "CRITICAL"})
+
+
+def _ai_auto_ack_max_score() -> Optional[int]:
+    raw = os.getenv("AI_AUTO_ACK_WHEN_AI_SCORE_LE", "").strip()
+    if raw.isdigit():
+        return int(raw)
+    return None
+
+
+async def _maybe_auto_ack_alert(conn, alert_id: int, bundle: Optional[AlertAiBundle]) -> None:
+    cap = _ai_auto_ack_max_score()
+    if cap is None or bundle is None or bundle.advisory_score is None:
+        return
+    if bundle.advisory_score <= cap:
+        await conn.execute(
+            "UPDATE alerts SET acknowledged = TRUE WHERE id = $1",
+            alert_id,
+        )
 
 
 def normalize_severity_filter(raw: Optional[str]) -> Optional[str]:
@@ -112,6 +130,18 @@ async def startup() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_threat_events_created_at
             ON threat_events (created_at DESC);
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS ai_advisory_score INTEGER;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS ai_recommendations TEXT;
             """
         )
         await conn.execute(
@@ -205,10 +235,29 @@ async def ingest_request(payload: IngestRequest) -> dict[str, str]:
             )
             if duplicate is None:
                 reasons_text = "; ".join(all_reasons)
+                bundle: Optional[AlertAiBundle] = None
+                ai_advisory: Optional[int] = None
+                ai_recs: Optional[str] = None
+                if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
+                    bundle = await fetch_alert_ai_bundle(
+                        subject=f"IP {payload.ip_address}",
+                        event_type=event_type,
+                        severity=severity,
+                        reasons_text=reasons_text,
+                        rule_score=rule_score,
+                        anomaly_score=anomaly_score,
+                        final_score=final_score,
+                    )
+                    if bundle:
+                        ai_advisory = bundle.advisory_score
+                        ai_recs = bundle.recommendations
                 event_id = await conn.fetchval(
                     """
-                    INSERT INTO threat_events (ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                    INSERT INTO threat_events (
+                        ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons,
+                        ai_advisory_score, ai_recommendations
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                     RETURNING id
                     """,
                     payload.ip_address,
@@ -218,29 +267,24 @@ async def ingest_request(payload: IngestRequest) -> dict[str, str]:
                     final_score,
                     severity,
                     reasons_text,
+                    ai_advisory,
+                    ai_recs,
                 )
                 if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
-                    ai_line = await optional_alert_explanation(
-                        subject=f"IP {payload.ip_address}",
-                        event_type=event_type,
-                        severity=severity,
-                        reasons_text=reasons_text,
-                        rule_score=rule_score,
-                        anomaly_score=anomaly_score,
-                        final_score=final_score,
-                    )
                     message = f"{severity} threat from {payload.ip_address}: " + reasons_text
-                    if ai_line:
-                        message += f" | AI: {ai_line}"
-                    await conn.execute(
+                    if bundle and bundle.explanation:
+                        message += f" | AI: {bundle.explanation}"
+                    alert_id = await conn.fetchval(
                         """
                         INSERT INTO alerts (threat_event_id, severity, message)
                         VALUES ($1, $2, $3)
+                        RETURNING id
                         """,
                         event_id,
                         severity,
                         message,
                     )
+                    await _maybe_auto_ack_alert(conn, int(alert_id), bundle)
                 if severity == "CRITICAL":
                     await block_ip_in_db(
                         conn=conn,
@@ -309,10 +353,30 @@ async def ingest_portguard(
         if duplicate is not None:
             return {"status": "deduped"}
 
+        bundle: Optional[AlertAiBundle] = None
+        ai_advisory: Optional[int] = None
+        ai_recs: Optional[str] = None
+        if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
+            bundle = await fetch_alert_ai_bundle(
+                subject=f"Port Guard target {payload.target}",
+                event_type=event_type,
+                severity=severity,
+                reasons_text=reasons,
+                rule_score=rule_score,
+                anomaly_score=0,
+                final_score=rule_score,
+            )
+            if bundle:
+                ai_advisory = bundle.advisory_score
+                ai_recs = bundle.recommendations
+
         event_id = await conn.fetchval(
             """
-            INSERT INTO threat_events (ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons)
-            VALUES ($1, $2, $3, 0, $3, $4, $5)
+            INSERT INTO threat_events (
+                ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons,
+                ai_advisory_score, ai_recommendations
+            )
+            VALUES ($1, $2, $3, 0, $3, $4, $5, $6, $7)
             RETURNING id
             """,
             pseudo_ip,
@@ -320,6 +384,8 @@ async def ingest_portguard(
             rule_score,
             severity,
             reasons,
+            ai_advisory,
+            ai_recs,
         )
         if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
             port_detail = "; ".join(
@@ -330,26 +396,19 @@ async def ingest_portguard(
                 f"{severity} Port Guard: newly open ports on {payload.target} "
                 f"(scan {payload.scan_id}) - {port_detail}"
             )
-            ai_line = await optional_alert_explanation(
-                subject=f"Port Guard target {payload.target}",
-                event_type=event_type,
-                severity=severity,
-                reasons_text=reasons,
-                rule_score=rule_score,
-                anomaly_score=0,
-                final_score=rule_score,
-            )
-            if ai_line:
-                message += f" | AI: {ai_line}"
-            await conn.execute(
+            if bundle and bundle.explanation:
+                message += f" | AI: {bundle.explanation}"
+            alert_id = await conn.fetchval(
                 """
                 INSERT INTO alerts (threat_event_id, severity, message)
                 VALUES ($1, $2, $3)
+                RETURNING id
                 """,
                 event_id,
                 severity,
                 message,
             )
+            await _maybe_auto_ack_alert(conn, int(alert_id), bundle)
     return {"status": "recorded"}
 
 
@@ -380,7 +439,8 @@ async def get_events(
         if sev:
             rows = await conn.fetch(
                 """
-                SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at
+                SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at,
+                       ai_advisory_score, ai_recommendations
                 FROM threat_events
                 WHERE severity = $1
                 ORDER BY created_at DESC
@@ -392,7 +452,8 @@ async def get_events(
         else:
             rows = await conn.fetch(
                 """
-                SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at
+                SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at,
+                       ai_advisory_score, ai_recommendations
                 FROM threat_events
                 ORDER BY created_at DESC
                 LIMIT $1
@@ -413,10 +474,13 @@ async def get_alerts(
         if sev:
             rows = await conn.fetch(
                 """
-                SELECT id, threat_event_id, severity, message, created_at, acknowledged
-                FROM alerts
-                WHERE severity = $1
-                ORDER BY created_at DESC
+                SELECT a.id, a.threat_event_id, a.severity, a.message, a.created_at, a.acknowledged,
+                       t.ai_advisory_score, t.ai_recommendations,
+                       t.ip_address AS source_ip
+                FROM alerts a
+                INNER JOIN threat_events t ON t.id = a.threat_event_id
+                WHERE a.severity = $1
+                ORDER BY a.created_at DESC
                 LIMIT $2
                 """,
                 sev,
@@ -425,9 +489,12 @@ async def get_alerts(
         else:
             rows = await conn.fetch(
                 """
-                SELECT id, threat_event_id, severity, message, created_at, acknowledged
-                FROM alerts
-                ORDER BY created_at DESC
+                SELECT a.id, a.threat_event_id, a.severity, a.message, a.created_at, a.acknowledged,
+                       t.ai_advisory_score, t.ai_recommendations,
+                       t.ip_address AS source_ip
+                FROM alerts a
+                INNER JOIN threat_events t ON t.id = a.threat_event_id
+                ORDER BY a.created_at DESC
                 LIMIT $1
                 """,
                 limit,

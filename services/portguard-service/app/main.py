@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import socket
+import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
 
@@ -162,11 +163,46 @@ CREATE TABLE IF NOT EXISTS port_scan_results (
 CREATE INDEX IF NOT EXISTS idx_port_scan_results_scan ON port_scan_results (scan_id);
 """
 
+SCHEDULE_PREFS_SQL = """
+CREATE TABLE IF NOT EXISTS portguard_schedule_prefs (
+    id SMALLINT PRIMARY KEY DEFAULT 1 CHECK (id = 1),
+    enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    minutes INTEGER NOT NULL DEFAULT 60,
+    targets JSONB NOT NULL DEFAULT '[]'::jsonb,
+    last_background_run_at TIMESTAMPTZ
+);
+"""
+
+
+async def _seed_schedule_prefs_if_empty(conn) -> None:
+    exists = await conn.fetchval("SELECT 1 FROM portguard_schedule_prefs WHERE id = 1")
+    if exists is not None:
+        return
+    en = os.getenv("PORTGUARD_SCHEDULE_ENABLED", "").lower() in ("1", "true", "yes")
+    minutes = _parse_schedule_minutes()
+    raw = os.getenv("PORTGUARD_SCHEDULE_TARGETS", "").strip()
+    if raw:
+        targets = _normalize_schedule_targets([t.strip() for t in raw.split(",") if t.strip()])
+    else:
+        targets = []
+    await conn.execute(
+        """
+        INSERT INTO portguard_schedule_prefs (id, enabled, minutes, targets)
+        VALUES (1, $1, $2, $3::jsonb)
+        """,
+        en,
+        minutes,
+        json.dumps(targets),
+    )
+
 
 async def migrate() -> None:
     pool = await get_pool()
     async with pool.acquire() as conn:
         await conn.execute(MIGRATION_SQL)
+        await conn.execute("ALTER TABLE port_scans ADD COLUMN IF NOT EXISTS duration_ms INTEGER;")
+        await conn.execute(SCHEDULE_PREFS_SQL)
+        await _seed_schedule_prefs_if_empty(conn)
 
 
 app = FastAPI(title="SentinelStack Port Guard", version="0.1.0")
@@ -234,6 +270,7 @@ async def perform_scan(target: str) -> PortScanDetail:
             detail=f"Target not allowed. Use one of: {sorted(allowed)}",
         )
 
+    scan_start = time.perf_counter()
     ports = _scan_ports()
     timeout = _connect_timeout()
     open_ports: List[int] = []
@@ -302,6 +339,12 @@ async def perform_scan(target: str) -> PortScanDetail:
             """,
             scan_id,
         )
+        duration_ms = max(0, int((time.perf_counter() - scan_start) * 1000))
+        await conn.execute(
+            "UPDATE port_scans SET duration_ms = $1 WHERE id = $2",
+            duration_ms,
+            scan_id,
+        )
 
     results = [
         PortResult(
@@ -337,6 +380,14 @@ async def _scheduled_sweep() -> None:
             logger.warning("scheduled scan skipped invalid target %s", t)
         except Exception:
             logger.exception("scheduled scan failed for %s", t)
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE portguard_schedule_prefs SET last_background_run_at = NOW() WHERE id = 1",
+            )
+    except Exception:
+        logger.exception("failed to update last_background_run_at")
 
 
 def _parse_schedule_minutes(raw_minutes: Optional[str] = None) -> int:
@@ -385,14 +436,50 @@ def _normalize_schedule_targets(targets: List[str]) -> List[str]:
     return normalized
 
 
+async def _load_schedule_prefs_from_db() -> None:
+    global _schedule_minutes, _schedule_targets_override
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT enabled, minutes, targets FROM portguard_schedule_prefs WHERE id = 1",
+        )
+    if row is None:
+        return
+    _schedule_minutes = max(1, min(int(row["minutes"]), 1440))
+    raw_targets = row["targets"]
+    if isinstance(raw_targets, str):
+        raw_targets = json.loads(raw_targets)
+    normalized = _normalize_schedule_targets([str(t) for t in raw_targets]) if raw_targets else []
+    _schedule_targets_override = normalized
+    if row["enabled"]:
+        _start_scheduler(_schedule_minutes)
+    else:
+        _stop_scheduler()
+
+
+async def _persist_schedule_prefs() -> None:
+    pool = await get_pool()
+    tgts = _schedule_targets()
+    en = _scheduler_enabled()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            UPDATE portguard_schedule_prefs SET
+                enabled = $1,
+                minutes = $2,
+                targets = $3::jsonb
+            WHERE id = 1
+            """,
+            en,
+            _schedule_minutes,
+            json.dumps(tgts),
+        )
+
+
 @app.on_event("startup")
 async def startup() -> None:
-    global _schedule_minutes
     await migrate()
-    _schedule_minutes = _parse_schedule_minutes()
-    raw = os.getenv("PORTGUARD_SCHEDULE_ENABLED", "").lower()
-    if raw in ("1", "true", "yes"):
-        _start_scheduler(_schedule_minutes)
+    await _load_schedule_prefs_from_db()
 
 
 @app.on_event("shutdown")
@@ -414,11 +501,18 @@ async def run_scan(body: ScanRequest) -> PortScanDetail:
 
 @app.get("/schedule", response_model=ScheduleStatus)
 async def get_schedule() -> ScheduleStatus:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT last_background_run_at FROM portguard_schedule_prefs WHERE id = 1",
+        )
+    last_at = row["last_background_run_at"] if row else None
     return ScheduleStatus(
         enabled=_scheduler_enabled(),
         minutes=_schedule_minutes,
         targets=_schedule_targets(),
         allowed_targets=sorted(_allowed_targets()),
+        last_background_run_at=last_at,
     )
 
 
@@ -441,11 +535,19 @@ async def update_schedule(body: ScheduleUpdateRequest) -> ScheduleStatus:
         # Apply minute changes immediately when running.
         _start_scheduler(_schedule_minutes)
 
+    await _persist_schedule_prefs()
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT last_background_run_at FROM portguard_schedule_prefs WHERE id = 1",
+        )
+    last_at = row["last_background_run_at"] if row else None
     return ScheduleStatus(
         enabled=_scheduler_enabled(),
         minutes=_schedule_minutes,
         targets=_schedule_targets(),
         allowed_targets=sorted(_allowed_targets()),
+        last_background_run_at=last_at,
     )
 
 
@@ -483,7 +585,7 @@ async def list_scans(limit: int = 20) -> List[PortScanSummary]:
     async with pool.acquire() as conn:
         scans = await conn.fetch(
             """
-            SELECT s.id, s.target, s.scanned_at,
+            SELECT s.id, s.target, s.scanned_at, s.duration_ms,
                    COUNT(*) FILTER (WHERE r.state = 'open') AS open_count,
                    COUNT(*) FILTER (WHERE r.state = 'open' AND r.risk_level IN ('HIGH','CRITICAL')) AS high_risk_count,
                    COALESCE(
@@ -504,7 +606,7 @@ async def list_scans(limit: int = 20) -> List[PortScanSummary]:
                    ) AS open_ports
             FROM port_scans s
             LEFT JOIN port_scan_results r ON r.scan_id = s.id
-            GROUP BY s.id, s.target, s.scanned_at
+            GROUP BY s.id, s.target, s.scanned_at, s.duration_ms
             ORDER BY s.scanned_at DESC
             LIMIT $1
             """,
@@ -515,6 +617,7 @@ async def list_scans(limit: int = 20) -> List[PortScanSummary]:
             id=s["id"],
             target=s["target"],
             scanned_at=s["scanned_at"],
+            duration_ms=s["duration_ms"],
             open_count=s["open_count"] or 0,
             high_risk_count=s["high_risk_count"] or 0,
             open_ports=_coerce_open_ports(s["open_ports"]),

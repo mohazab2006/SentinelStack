@@ -18,11 +18,90 @@ body {
 
 .dashboard-header {
   margin-bottom: 20px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
 }
 
 .dashboard-header h1 {
   margin: 0;
   font-size: 1.85rem;
+  flex: 1 1 200px;
+}
+
+.dashboard-refresh-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  background: #101b2f;
+  border: 1px solid #22314d;
+  border-radius: 10px;
+}
+
+.btn-refresh {
+  font-size: 11px;
+  padding: 6px 10px;
+}
+
+.refresh-interval-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  color: #9fb4cc;
+}
+
+.refresh-interval-select {
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid #355587;
+  background: #0f1829;
+  color: #e6edf3;
+  font-size: 12px;
+}
+
+.refresh-paused-note {
+  font-size: 0.75rem;
+  color: #c9a227;
+}
+
+.data-export-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  background: #101b2f;
+  border: 1px solid #22314d;
+  border-radius: 10px;
+}
+
+.data-export-label {
+  font-size: 0.78rem;
+  color: #9fb4cc;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-right: 4px;
+}
+
+.portguard-last-run {
+  margin: 0 0 12px;
+  font-size: 0.88rem;
+  color: #c6d5e6;
+}
+
+.portguard-last-run-label {
+  display: block;
+  font-size: 0.72rem;
+  color: #9fb4cc;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin-bottom: 4px;
 }
 
 .dashboard-header p {
@@ -280,6 +359,32 @@ tbody tr:hover {
 .btn:disabled {
   opacity: 0.65;
   cursor: not-allowed;
+}
+
+.btn-table-block {
+  padding: 4px 8px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.table-block-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-items: flex-start;
+  min-width: 5.5rem;
+}
+
+.table-block-na {
+  color: #6b7f95;
+  font-size: 0.85rem;
+}
+
+.table-block-error {
+  color: #ffb2b2;
+  font-size: 0.72rem;
+  max-width: 10rem;
+  line-height: 1.25;
 }
 
 .error-text {
@@ -569,6 +674,13 @@ tbody tr:hover {
 .summary-count {
   color: #9fb4cc;
   font-weight: 600;
+}
+
+.ai-recs-cell {
+  font-size: 0.82rem;
+  color: #c6d5e6;
+  max-width: 22rem;
+  line-height: 1.35;
 }
 
 .table-filters-card {
