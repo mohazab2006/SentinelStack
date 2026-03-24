@@ -17,11 +17,22 @@ It implements an end-to-end SOC-style pipeline — **ingest → detect → persi
 
 ## What it does
 
-- **Detection:** Threshold rules (e.g. failed logins, spikes, probing) plus lightweight anomaly signals; merged into a capped **final score** and severity.
-- **Response:** Alerts; **auto-block** on critical paths; **manual block** from the UI for lower severities; Port Guard can raise alerts on new listening ports.
-- **AI leverage:** New alerts can receive a **structured LLM response** in one round-trip (`OPENAI_API_KEY` in `.env`): **plain-English summary** on the alert, an **advisory 0–100 risk score** (separate from rule/anomaly scores), and **recommended next steps**, stored and surfaced on the dashboard. **Heuristics still drive severity and blocking**; env toggles control each AI output; **auto-ack** can clear low-confidence noise when the advisory score is below a threshold you set.
-- **Analyst view:** Rolling **activity summary** (1h/24h), severity filters, sanity checks on summary math.
-- **Ops:** Paused / configurable dashboard refresh, `scripts/validate_stack.ps1` for a quick summary health readout.
+**Detection**  
+Looks for bad patterns (like many failed logins, traffic spikes, or odd URL/status mix).  
+Combines **fixed rules** with a small **behavioral/anomaly** bump, then assigns a **score** and **severity**.
+
+**Response**  
+Turns serious scores into **alerts**. **Critical** can **auto-block** the IP. **Lower** severities can be **blocked manually** from the dashboard. **Port Guard** can alert when **new ports** show up on internal hosts.
+
+**AI (OpenAI)**  
+One API call can add to each new alert: a **short explanation**, an **advisory risk score (0–100)**, and **suggested next steps** — shown on the dashboard and stored in the DB.  
+**Who’s in charge?** Rules + anomaly scores still set **severity** and **blocking**. You turn AI pieces on/off in `.env`. You can also **auto-ack** alerts when the AI score is very low (noise control).
+
+**Dashboard**  
+Live **metrics**, **alerts** and **events** (with severity filters), **Activity summary** (last hour or 24h), and quick checks that summary numbers add up.
+
+**Day-to-day**  
+You can **pause** or slow **auto-refresh**. Run **`scripts/validate_stack.ps1`** to print summary health from the API.
 
 ## Run
 
