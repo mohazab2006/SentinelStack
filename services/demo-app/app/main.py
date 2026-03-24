@@ -13,6 +13,37 @@ admin_token = os.getenv("ADMIN_TOKEN", "admin-secret")
 
 @app.middleware("http")
 async def request_logger(request: Request, call_next):
+    if request.url.path != "/":
+        client_ip_for_block = request.headers.get(
+            "x-forwarded-for", request.client.host if request.client else "unknown"
+        )
+        if "," in client_ip_for_block:
+            client_ip_for_block = client_ip_for_block.split(",")[0].strip()
+        try:
+            async with httpx.AsyncClient(timeout=1.5) as client:
+                block_check = await client.get(
+                    f"{logging_service_url}/is-blocked",
+                    params={"ip": client_ip_for_block},
+                )
+                if block_check.status_code == 200 and block_check.json().get("blocked"):
+                    response = JSONResponse(
+                        {"error": "Forbidden: IP is temporarily blocked"},
+                        status_code=403,
+                    )
+                    payload = {
+                        "ip_address": client_ip_for_block,
+                        "method": request.method,
+                        "path": request.url.path,
+                        "status_code": 403,
+                        "user_agent": request.headers.get("user-agent"),
+                        "response_time_ms": 0,
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                    }
+                    await client.post(f"{logging_service_url}/ingest-request", json=payload)
+                    return response
+        except Exception:
+            pass
+
     started_at = time.perf_counter()
     response = await call_next(request)
     response_time_ms = int((time.perf_counter() - started_at) * 1000)

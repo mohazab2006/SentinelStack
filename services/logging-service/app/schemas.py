@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class IngestRequest(BaseModel):
@@ -44,3 +44,18 @@ class Alert(BaseModel):
     message: str
     created_at: datetime
     acknowledged: bool
+
+
+class BlockedIp(BaseModel):
+    id: int
+    ip_address: str
+    reason: str
+    blocked_at: datetime
+    expires_at: Optional[datetime]
+    active: bool
+
+
+class BlockIpRequest(BaseModel):
+    ip_address: str
+    reason: str = "manual block"
+    duration_minutes: Optional[int] = Field(default=60, ge=1, le=10080)

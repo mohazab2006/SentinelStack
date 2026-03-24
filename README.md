@@ -1,6 +1,6 @@
-# SentinelStack - Milestone 2
+# SentinelStack - Milestone 3
 
-Milestone 2 keeps the Milestone 1 observability pipeline and adds rule-based threat detection with alerts:
+Milestone 3 extends Milestone 2 with response actions:
 
 - traffic enters through NGINX
 - requests hit the demo app
@@ -8,14 +8,15 @@ Milestone 2 keeps the Milestone 1 observability pipeline and adds rule-based thr
 - logs are stored in Postgres
 - suspicious patterns trigger threat events
 - medium/high/critical events generate alerts
-- a Next.js dashboard displays recent logs and alerts
+- critical threats can trigger automated IP blocking
+- a Next.js dashboard displays logs, alerts, and blocked IPs
 
 ## Services
 
 - `nginx`: reverse proxy entrypoint (`http://localhost:8080`)
 - `demo-app`: protected demo API (proxied at `/api/demo/*`)
 - `logging-service`: ingest/list logs API (proxied at `/api/logging/*`)
-- `postgres`: stores `request_logs`, `threat_events`, and `alerts`
+- `postgres`: stores `request_logs`, `threat_events`, `alerts`, and `blocked_ips`
 - `frontend`: dashboard UI
 
 ## Project Structure
@@ -79,6 +80,13 @@ Then visible in dashboard via:
 - `GET /logs?limit=50` - list newest request logs
 - `GET /events?limit=50` - list newest threat events
 - `GET /alerts?limit=50` - list newest alerts
+- `GET /blocked-ips?limit=100` - list active blocked IPs
+- `GET /is-blocked?ip=<ip>` - check if IP is blocked
+- `POST /block-ip` - manual block
+- `POST /unblock-ip?ip=<ip>` - remove active blocks
+- `POST /alerts/{alert_id}/acknowledge` - acknowledge an alert
+- `GET /metrics/overview` - request/event/alert/block counters
+- `GET /metrics/severity` - severity distribution counts
 
 ## Detection Rules (Milestone 2)
 
@@ -98,13 +106,34 @@ Scoring maps to severity:
 
 Alerts are created automatically for Medium and above.
 
+## Response Actions (Milestone 3)
+
+- Critical events trigger automatic IP block for 60 minutes.
+- Demo app checks block status before serving protected requests.
+- Blocked IP requests receive `403 Forbidden`.
+- Manual blocking and unblocking are supported via logging-service endpoints.
+- Alerts can be acknowledged from the dashboard operations panel.
+
+## Configurable Thresholds
+
+Rule thresholds, weights, severity cutoffs, and auto-block duration are configurable through `.env`:
+
+- `FAILED_LOGIN_THRESHOLD`, `FAILED_LOGIN_SCORE`
+- `REQUEST_SPIKE_THRESHOLD`, `REQUEST_SPIKE_SCORE`
+- `REPEATED_404_THRESHOLD`, `REPEATED_404_SCORE`
+- `SENSITIVE_PROBE_THRESHOLD`, `SENSITIVE_PROBE_SCORE`
+- `LOW_MAX`, `MEDIUM_MAX`, `HIGH_MAX`
+- `AUTO_BLOCK_MINUTES`
+
 ## Validation Checklist
 
 - `docker compose up --build` starts all services
 - hitting `/api/demo/*` writes rows to Postgres
 - suspicious traffic creates rows in `/api/logging/events`
 - medium/high/critical events create rows in `/api/logging/alerts`
-- dashboard shows logs and alerts
+- critical traffic can create active entries in `/api/logging/blocked-ips`
+- blocked IP traffic gets `403`
+- dashboard shows logs, alerts, and blocked IPs
 - data persists with `postgres_data` volume
 
 ## Notes

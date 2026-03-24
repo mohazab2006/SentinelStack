@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 export const metadata = {
   title: "SentinelStack Dashboard",
-  description: "Milestone 1 request visibility dashboard"
+  description: "Threat detection, alerts, and automated response dashboard"
 };
 
 export default function RootLayout({ children }: { children: ReactNode }) {

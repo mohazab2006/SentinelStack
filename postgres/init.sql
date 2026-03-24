@@ -35,3 +35,14 @@ CREATE TABLE IF NOT EXISTS alerts (
 );
 
 CREATE INDEX IF NOT EXISTS idx_alerts_created_at ON alerts (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS blocked_ips (
+    id SERIAL PRIMARY KEY,
+    ip_address VARCHAR(64) NOT NULL,
+    reason TEXT NOT NULL,
+    blocked_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    expires_at TIMESTAMPTZ,
+    active BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE INDEX IF NOT EXISTS idx_blocked_ips_active_ip ON blocked_ips (ip_address, active, expires_at DESC);
