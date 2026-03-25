@@ -1,13 +1,23 @@
-"""Cohort z-score anomaly scoring (0.0–1.0), explainable — no ML infra."""
+"""
+Behavioral anomaly pipeline (0.0–1.0):
+
+1) Statistical cohort z-scores (or single-IP fallback caps)
+2) IsolationForest on the same window’s per-IP feature vectors (optional)
+3) Optional OpenAI advisory score (gated by signal; blended, not sole driver)
+
+CRITICAL auto-block still requires rule_score floor in fusion — see fusion.py.
+"""
 
 from __future__ import annotations
 
 import math
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import mean, pstdev
-from typing import Any
+from typing import Any, Optional
 
+from .ai_insights import anomaly_llm_enabled, fetch_llm_anomaly_assessment
+from .anomaly_ml import isolation_forest_norms_by_ip
 from .features import (
     FeatureRow,
     FeatureSnapshot,
@@ -39,34 +49,12 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-# Minimum distinct cohort IPs with valid samples required to z-score.
 MIN_COHORT_IPS = _env_int("ANOMALY_MIN_COHORT_IPS", 3)
 EPSILON = _env_float("ANOMALY_STDDEV_EPSILON", 1e-6)
 
-
-def _cohort_fallback_enabled() -> bool:
-    raw = os.getenv("ANOMALY_COHORT_FALLBACK", "true").lower()
-    return raw in ("1", "true", "yes")
-
-
-# Deterministic soft caps when cohort is too small (e.g. lab / single visible IP).
-_FALLBACK_CAPS: dict[str, float] = {
-    "requests_per_minute": 80.0,
-    "failed_auth_ratio": 0.85,
-    "unique_endpoints": 18.0,
-    "pct_4xx": 0.75,
-    "pct_5xx": 0.35,
-    "avg_inter_request_seconds": 15.0,
-    "inter_request_variance": 120.0,
-    "path_entropy": 4.0,
-    "suspicious_payload_rate": 0.08,
-    "auth_endpoint_concentration": 0.65,
-}
-# Per-feature tanh scale; larger k => need larger |z| to saturate.
-Z_SCALE = _env_float("ANOMALY_Z_SCALE", 2.0)
+_Z_SCALE = _env_float("ANOMALY_Z_SCALE", 2.0)
 TOP_CONTRIBUTORS = _env_int("ANOMALY_TOP_FEATURES", 5)
 
-# Weights (sum need not be 1; normalized internally).
 _DEFAULT_WEIGHTS: dict[str, float] = {
     "requests_per_minute": 1.0,
     "failed_auth_ratio": 1.2,
@@ -102,14 +90,93 @@ def _parse_weights_from_env() -> dict[str, float]:
 _FEATURE_WEIGHTS = _parse_weights_from_env()
 
 
+def _cohort_fallback_enabled() -> bool:
+    return os.getenv("ANOMALY_COHORT_FALLBACK", "true").lower() in ("1", "true", "yes")
+
+
+_FALLBACK_CAPS: dict[str, float] = {
+    "requests_per_minute": 80.0,
+    "failed_auth_ratio": 0.85,
+    "unique_endpoints": 18.0,
+    "pct_4xx": 0.75,
+    "pct_5xx": 0.35,
+    "avg_inter_request_seconds": 15.0,
+    "inter_request_variance": 120.0,
+    "path_entropy": 4.0,
+    "suspicious_payload_rate": 0.08,
+    "auth_endpoint_concentration": 0.65,
+}
+
+
 @dataclass
 class AnomalyResult:
     anomaly_score_norm: float
     contributing_features: list[dict[str, Any]]
+    layer_scores: dict[str, float] = field(default_factory=dict)
+    blend_weights: dict[str, float] = field(default_factory=dict)
+    llm_anomaly_note: Optional[str] = None
+
+
+def blend_anomaly_layers(
+    statistical: float,
+    iforest: Optional[float],
+    llm: Optional[float],
+) -> tuple[float, dict[str, float], dict[str, float]]:
+    """Weighted blend; missing layers drop out and weights renormalize."""
+    w_s = _env_float("ANOMALY_BLEND_STAT_WEIGHT", 0.45)
+    w_i = _env_float("ANOMALY_BLEND_IFOREST_WEIGHT", 0.30)
+    w_l = _env_float("ANOMALY_BLEND_LLM_WEIGHT", 0.25)
+
+    use_i = iforest is not None
+    use_l = llm is not None
+    den = w_s + (w_i if use_i else 0.0) + (w_l if use_l else 0.0)
+    if den <= 0:
+        return float(statistical), {"statistical": statistical}, {}
+
+    num = w_s * statistical
+    if use_i:
+        num += w_i * float(iforest)
+    if use_l:
+        num += w_l * float(llm)
+
+    blended = max(0.0, min(1.0, num / den))
+    layers = {"statistical": float(statistical)}
+    if use_i:
+        layers["isolation_forest"] = float(iforest)
+    if use_l:
+        layers["llm"] = float(llm)
+    layers["blended"] = blended
+
+    weights_active = {"statistical": w_s}
+    if use_i:
+        weights_active["isolation_forest"] = w_i
+    if use_l:
+        weights_active["llm"] = w_l
+    weights_used = {k: v / den for k, v in weights_active.items()}
+    return blended, layers, weights_used
+
+
+def _llm_worth_call(
+    rule_score: int,
+    statistical: float,
+    iforest: Optional[float],
+) -> bool:
+    if not anomaly_llm_enabled():
+        return False
+    if os.getenv("ANOMALY_LLM_ALWAYS", "false").lower() in ("1", "true", "yes"):
+        return True
+    if rule_score > 0:
+        return True
+    gate_s = _env_float("ANOMALY_LLM_STAT_GATE", 0.15)
+    gate_i = _env_float("ANOMALY_LLM_IFOREST_GATE", 0.2)
+    if statistical >= gate_s:
+        return True
+    if iforest is not None and iforest >= gate_i:
+        return True
+    return False
 
 
 def _fallback_subject_anomaly(subject: FeatureSnapshot) -> AnomalyResult:
-    """Magnitude-vs-cap scoring when peer cohort is unavailable; still deterministic."""
     sub = feature_dict_for_z(subject)
     contributors: list[tuple[str, float, float, float]] = []
     weighted_parts: list[float] = []
@@ -139,7 +206,12 @@ def _fallback_subject_anomaly(subject: FeatureSnapshot) -> AnomalyResult:
                 "contribution": round(weighted, 6),
             }
         )
-    return AnomalyResult(norm, top)
+    return AnomalyResult(
+        norm,
+        top,
+        layer_scores={"statistical": norm, "blended": norm},
+        blend_weights={"statistical": 1.0},
+    )
 
 
 def _cohort_mean_std(
@@ -168,12 +240,13 @@ def score_subject_vs_cohort(
     cohort_by_ip: dict[str, FeatureSnapshot],
     subject_ip: str,
 ) -> AnomalyResult:
-    """
-    Compare subject feature vector to cohort distribution (other IPs with sufficient sample).
-    Returns anomaly_score_norm in [0, 1] and ranked contributing features.
-    """
     if subject.insufficient_sample:
-        return AnomalyResult(0.0, [])
+        return AnomalyResult(
+            0.0,
+            [],
+            layer_scores={"statistical": 0.0, "blended": 0.0},
+            blend_weights={"statistical": 1.0},
+        )
 
     cohort_ips = [
         ip
@@ -183,7 +256,12 @@ def score_subject_vs_cohort(
     if len(cohort_ips) < MIN_COHORT_IPS:
         if _cohort_fallback_enabled():
             return _fallback_subject_anomaly(subject)
-        return AnomalyResult(0.0, [])
+        return AnomalyResult(
+            0.0,
+            [],
+            layer_scores={"statistical": 0.0, "blended": 0.0},
+            blend_weights={"statistical": 1.0},
+        )
 
     cohort_dicts = [feature_dict_for_z(cohort_by_ip[ip]) for ip in cohort_ips]
     mus, sigmas = _cohort_mean_std(cohort_dicts)
@@ -199,17 +277,12 @@ def score_subject_vs_cohort(
         sigma = sigmas[key]
         z = (v - mu) / sigma
         mag = abs(z)
-        # Saturation curve: 0 at z=0, approaches 1 for large |z|
-        contrib = math.tanh(mag / max(Z_SCALE, 1e-6))
+        contrib = math.tanh(mag / max(_Z_SCALE, 1e-6))
         weighted_parts.append(contrib * w)
         w_sum += w
         contributors.append((key, v, z, contrib * w))
 
-    if w_sum <= 0:
-        norm = 0.0
-    else:
-        norm = min(1.0, max(0.0, sum(weighted_parts) / w_sum))
-
+    norm = min(1.0, max(0.0, sum(weighted_parts) / w_sum)) if w_sum > 0 else 0.0
     contributors.sort(key=lambda t: t[3], reverse=True)
     top: list[dict[str, Any]] = []
     for name, value, z, weighted in contributors[:TOP_CONTRIBUTORS]:
@@ -225,8 +298,12 @@ def score_subject_vs_cohort(
                 "contribution": round(weighted, 6),
             }
         )
-
-    return AnomalyResult(norm, top)
+    return AnomalyResult(
+        norm,
+        top,
+        layer_scores={"statistical": norm, "blended": norm},
+        blend_weights={"statistical": 1.0},
+    )
 
 
 async def compute_behavioral_anomaly(
@@ -234,14 +311,52 @@ async def compute_behavioral_anomaly(
     subject_ip: str,
     window_minutes: int,
     min_sample: int,
+    rule_score: int = 0,
 ) -> tuple[FeatureSnapshot, AnomalyResult]:
     records = await fetch_window_rows(conn, window_minutes)
     grouped = group_rows_by_ip(list(records))
     cohort = build_cohort_snapshots(grouped, float(window_minutes), min_sample)
     subject_rows = grouped.get(subject_ip, [])
     subject_snap = compute_features_for_rows(subject_rows, float(window_minutes), min_sample)
-    result = score_subject_vs_cohort(subject_snap, cohort, subject_ip)
-    return subject_snap, result
+
+    stat_block = score_subject_vs_cohort(subject_snap, cohort, subject_ip)
+    stat_norm = stat_block.anomaly_score_norm
+    contrib = list(stat_block.contributing_features)
+
+    if_map = isolation_forest_norms_by_ip(cohort)
+    if_n = if_map.get(subject_ip)
+
+    llm_n: Optional[float] = None
+    llm_note: Optional[str] = None
+    feats_for_llm = subject_snap.to_json_dict() if not subject_snap.insufficient_sample else {}
+    if _llm_worth_call(rule_score, stat_norm, if_n):
+        llm_n, llm_note = await fetch_llm_anomaly_assessment(
+            subject_ip=subject_ip,
+            features=feats_for_llm,
+            statistical_norm=stat_norm,
+            iforest_norm=if_n,
+        )
+
+    blended, layer_scores, weights_used = blend_anomaly_layers(stat_norm, if_n, llm_n)
+
+    meta = {
+        "name": "_anomaly_layers",
+        "statistical": round(stat_norm, 4),
+        "isolation_forest": round(if_n, 4) if if_n is not None else None,
+        "llm": round(llm_n, 4) if llm_n is not None else None,
+        "blended": round(blended, 4),
+        "blend_weights_used": {k: round(v, 4) for k, v in weights_used.items()},
+        "llm_note": llm_note,
+    }
+    contrib.insert(0, meta)
+
+    return subject_snap, AnomalyResult(
+        anomaly_score_norm=blended,
+        contributing_features=contrib,
+        layer_scores=layer_scores,
+        blend_weights=weights_used,
+        llm_anomaly_note=llm_note,
+    )
 
 
 def compute_features_for_rows(

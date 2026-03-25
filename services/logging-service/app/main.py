@@ -4,7 +4,13 @@ from typing import Annotated, Any, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Query
 
-from .ai_insights import AlertAiBundle, fetch_alert_ai_bundle
+from .ai_insights import (
+    AlertAiBundle,
+    ai_insights_configured,
+    anomaly_llm_enabled,
+    fetch_alert_ai_bundle,
+)
+from .anomaly_ml import iforest_enabled
 from .anomaly_scorer import compute_behavioral_anomaly
 from .db import close_pool, get_pool
 from .fusion import (
@@ -195,6 +201,55 @@ async def startup() -> None:
         )
         await conn.execute(
             """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS detection_metadata JSONB;
+            """
+        )
+        # Legacy DBs may have these columns as TEXT; asyncpg then expects str, not dict.
+        await conn.execute(
+            r"""
+            DO $migrate$
+            DECLARE
+                col text;
+            BEGIN
+                FOREACH col IN ARRAY ARRAY[
+                    'features',
+                    'triggered_rules',
+                    'contributing_features',
+                    'detection_metadata'
+                ]
+                LOOP
+                    IF EXISTS (
+                        SELECT 1
+                        FROM information_schema.columns c
+                        WHERE c.table_schema = 'public'
+                          AND c.table_name = 'threat_events'
+                          AND c.column_name = col
+                          AND c.udt_name IN ('text', 'varchar')
+                    ) THEN
+                        EXECUTE format(
+                            $f$
+                            ALTER TABLE threat_events
+                            ALTER COLUMN %I TYPE JSONB USING (
+                                CASE
+                                    WHEN %I IS NULL OR btrim(%I::text) = '' THEN NULL
+                                    ELSE %I::jsonb
+                                END
+                            )
+                            $f$,
+                            col,
+                            col,
+                            col,
+                            col
+                        );
+                    END IF;
+                END LOOP;
+            END
+            $migrate$;
+            """
+        )
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS alerts (
                 id SERIAL PRIMARY KEY,
                 threat_event_id INTEGER NOT NULL REFERENCES threat_events(id) ON DELETE CASCADE,
@@ -241,6 +296,18 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+@app.get("/ai/status")
+async def ai_status() -> dict[str, Any]:
+    return {
+        "openai_configured": bool(os.getenv("OPENAI_API_KEY", "").strip()),
+        "openai_model": os.getenv("OPENAI_MODEL", "gpt-4o-mini").strip(),
+        "triage_enabled": ai_insights_configured(),
+        "anomaly_llm_enabled": anomaly_llm_enabled(),
+        "isolation_forest_enabled": iforest_enabled(),
+        "note": "Blocking and severity use deterministic rules + blended anomaly; LLM is advisory.",
+    }
+
+
 @app.post("/ingest-request", response_model=IngestResponse)
 async def ingest_request(
     payload: IngestRequest,
@@ -270,9 +337,15 @@ async def ingest_request(
             payload.ip_address,
             BEHAVIOR_WINDOW_MINUTES,
             BEHAVIOR_MIN_SAMPLES,
+            rule_score=rule_score,
         )
         anomaly_norm = anomaly_result.anomaly_score_norm
         contrib = anomaly_result.contributing_features
+        detection_meta = {
+            "layer_scores": anomaly_result.layer_scores,
+            "blend_weights": anomaly_result.blend_weights,
+            "llm_anomaly_note": anomaly_result.llm_anomaly_note,
+        }
         anomaly_score_int = legacy_anomaly_integer(anomaly_norm)
 
         if not should_create_event(rule_score, anomaly_norm):
@@ -286,6 +359,7 @@ async def ingest_request(
                     "threshold": ANOMALY_EVENT_THRESHOLD,
                     "triggered_rules": triggered_rules,
                     "contributing_features": contrib,
+                    "detection_metadata": detection_meta,
                 }
             return IngestResponse(status="logged", detection=detection_payload)
 
@@ -298,10 +372,13 @@ async def ingest_request(
         final_score = fusion.fused_score
         flagged = fusion.flagged
 
-        contrib_bits = [
-            f"{c['name']} z={c['z']}"
-            for c in contrib[:5]
-        ]
+        contrib_bits: list[str] = []
+        for c in contrib[:5]:
+            name = str(c.get("name", "feature"))
+            if "z" in c:
+                contrib_bits.append(f"{name} z={c['z']}")
+            elif "contribution" in c:
+                contrib_bits.append(f"{name} contribution={c['contribution']}")
         all_reasons: list[str] = list(reasons)
         if contrib_bits:
             all_reasons.append("behavioral: " + ", ".join(contrib_bits))
@@ -336,6 +413,7 @@ async def ingest_request(
                     "event_type": resolved_event_type,
                     "triggered_rules": triggered_rules,
                     "contributing_features": contrib,
+                    "detection_metadata": detection_meta,
                 }
             return IngestResponse(status="logged", detection=detection_payload)
 
@@ -351,6 +429,12 @@ async def ingest_request(
                 rule_score=rule_score,
                 anomaly_score=anomaly_score_int,
                 final_score=final_score,
+                triggered_rules=triggered_rules,
+                contributing_features=contrib,
+                severity_reason=fusion.severity_reason,
+                anomaly_score_norm=anomaly_norm,
+                feature_snapshot=features_json,
+                layer_scores=anomaly_result.layer_scores,
             )
             if bundle:
                 ai_advisory = bundle.advisory_score
@@ -361,9 +445,9 @@ async def ingest_request(
             INSERT INTO threat_events (
                 ip_address, source_key, event_type, rule_score, anomaly_score, anomaly_score_norm,
                 final_score, severity, reasons, severity_reason, features, triggered_rules,
-                contributing_features, flagged, ai_advisory_score, ai_recommendations
+                contributing_features, flagged, detection_metadata, ai_advisory_score, ai_recommendations
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
             RETURNING id
             """,
             payload.ip_address,
@@ -380,6 +464,7 @@ async def ingest_request(
             triggered_rules,
             contrib,
             flagged,
+            detection_meta,
             ai_advisory,
             ai_recs,
         )
@@ -427,6 +512,7 @@ async def ingest_request(
                 "contributing_features": contrib,
                 "severity_reason": fusion.severity_reason,
                 "features": features_json,
+                "detection_metadata": detection_meta,
             }
 
     return IngestResponse(status="logged", detection=detection_payload)
@@ -521,9 +607,9 @@ async def ingest_portguard(
             INSERT INTO threat_events (
                 ip_address, source_key, event_type, rule_score, anomaly_score, anomaly_score_norm,
                 final_score, severity, reasons, severity_reason, features, triggered_rules,
-                contributing_features, flagged, ai_advisory_score, ai_recommendations
+                contributing_features, flagged, detection_metadata, ai_advisory_score, ai_recommendations
             )
-            VALUES ($1, $2, $3, $4, 0, 0.0, $5, $6, $7, $8, NULL, $9, NULL, $10, $11, $12)
+            VALUES ($1, $2, $3, $4, 0, 0.0, $5, $6, $7, $8, NULL, $9, NULL, $10, NULL, $11, $12)
             RETURNING id
             """,
             pseudo_ip,
@@ -594,7 +680,7 @@ async def get_events(
                 SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at,
                        ai_advisory_score, ai_recommendations,
                        source_key, anomaly_score_norm, features, triggered_rules, contributing_features,
-                       severity_reason, flagged
+                       severity_reason, flagged, detection_metadata
                 FROM threat_events
                 WHERE severity = $1
                 ORDER BY created_at DESC
@@ -609,7 +695,7 @@ async def get_events(
                 SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at,
                        ai_advisory_score, ai_recommendations,
                        source_key, anomaly_score_norm, features, triggered_rules, contributing_features,
-                       severity_reason, flagged
+                       severity_reason, flagged, detection_metadata
                 FROM threat_events
                 ORDER BY created_at DESC
                 LIMIT $1
@@ -634,7 +720,7 @@ async def get_alerts(
                        t.ai_advisory_score, t.ai_recommendations,
                        t.ip_address AS source_ip,
                        t.anomaly_score_norm, t.triggered_rules, t.contributing_features,
-                       t.severity_reason, t.flagged
+                       t.severity_reason, t.flagged, t.detection_metadata
                 FROM alerts a
                 INNER JOIN threat_events t ON t.id = a.threat_event_id
                 WHERE a.severity = $1
@@ -651,7 +737,7 @@ async def get_alerts(
                        t.ai_advisory_score, t.ai_recommendations,
                        t.ip_address AS source_ip,
                        t.anomaly_score_norm, t.triggered_rules, t.contributing_features,
-                       t.severity_reason, t.flagged
+                       t.severity_reason, t.flagged, t.detection_metadata
                 FROM alerts a
                 INNER JOIN threat_events t ON t.id = a.threat_event_id
                 ORDER BY a.created_at DESC

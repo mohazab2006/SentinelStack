@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from app.features import FeatureRow, compute_features, feature_dict_for_z
+from app.anomaly_scorer import blend_anomaly_layers
 from app.fusion import fuse_scores, legacy_anomaly_integer, score_to_band, should_create_event
 
 
@@ -51,6 +52,15 @@ def test_should_create_event():
     assert should_create_event(1, 0.0) is True
     assert should_create_event(0, 0.71) is False
     assert should_create_event(0, 0.72) is True
+
+
+def test_blend_anomaly_layers():
+    b, layers, w = blend_anomaly_layers(0.4, 0.8, 0.6)
+    assert "blended" in layers
+    assert 0.0 <= b <= 1.0
+    assert abs(sum(w.values()) - 1.0) < 1e-6
+    b2, _, _ = blend_anomaly_layers(0.5, None, None)
+    assert b2 == pytest.approx(0.5)
 
 
 def test_score_to_band():

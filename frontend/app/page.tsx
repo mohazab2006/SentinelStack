@@ -6,6 +6,7 @@ import SummaryPanel from "./components/SummaryPanel";
 import TableSeverityFilters from "./components/TableSeverityFilters";
 import DataExportButtons from "./components/DataExportButtons";
 import IpBlockButton from "./components/IpBlockButton";
+import AiInsightsBanner from "./components/AiInsightsBanner";
 
 type RequestLog = {
   id: number;
@@ -33,6 +34,7 @@ type Alert = {
   contributing_features?: unknown[] | null;
   severity_reason?: string | null;
   flagged?: boolean | null;
+  detection_metadata?: Record<string, unknown> | null;
 };
 
 type ThreatEvent = {
@@ -54,6 +56,7 @@ type ThreatEvent = {
   contributing_features?: unknown[] | null;
   severity_reason?: string | null;
   flagged?: boolean | null;
+  detection_metadata?: Record<string, unknown> | null;
 };
 
 type BlockedIp = {
@@ -369,6 +372,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
         <h1>SentinelStack Dashboard</h1>
         <DashboardRefreshBar />
       </header>
+      <AiInsightsBanner />
       {loadErrors.length > 0 ? (
         <section className="card load-warning" aria-live="polite">
           <h2>Partial Data</h2>

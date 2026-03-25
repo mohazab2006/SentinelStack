@@ -44,6 +44,7 @@ class ThreatEvent(BaseModel):
     contributing_features: Optional[list] = None
     severity_reason: Optional[str] = None
     flagged: Optional[bool] = None
+    detection_metadata: Optional[dict[str, Any]] = None
 
 
 class Alert(BaseModel):
@@ -61,6 +62,7 @@ class Alert(BaseModel):
     contributing_features: Optional[list] = None
     severity_reason: Optional[str] = None
     flagged: Optional[bool] = None
+    detection_metadata: Optional[dict[str, Any]] = None
 
 
 class BlockedIp(BaseModel):

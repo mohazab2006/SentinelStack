@@ -1,75 +1,68 @@
 # SentinelStack AI
 
-A **Dockerized security monitoring system** that simulates a modern SOC-style pipeline — combining **deterministic threat detection**, **AI-assisted triage**, and **exposure monitoring (Port Guard)** to turn raw telemetry into actionable insight.
+SentinelStack is a Dockerized cyber security platform that combines deterministic detections with behavioral AI signals and analyst-facing AI triage.
 
-SentinelStack is designed to feel like a real security workflow: traffic is ingested, behavior is analyzed, threats are surfaced, responses are triggered, and operators get both **hard signals** and **AI-enhanced context** in one place.
-
----
-
-## What It Does
-
-SentinelStack connects the full pipeline:
-
-- **Ingest** application traffic and telemetry  
-- **Detect** threats using rules and behavioral scoring  
-- **Monitor** internal exposure with Port Guard  
-- **Respond** with blocking and operator control  
-- **Enhance** alerts with AI-assisted triage  
+It is built to feel like a real SOC workflow: ingest traffic, extract behavior, detect threats, fuse scores, trigger response, and provide explainable alert context.
 
 ---
 
-## Core Capabilities
+## What SentinelStack Does
 
-### Hybrid Threat Detection
-
-Transforms raw HTTP activity into structured signals such as:
-
-- credential abuse patterns  
-- abnormal request volume  
-- recon-style probing behavior  
-
-Detection combines:
-
-- **explicit rules and thresholds** (clear + explainable)  
-- **lightweight anomaly scoring** (behavioral context)  
-- **bounded scoring logic** (predictable outputs)  
-
-Each event produces a **score, severity, and reasoning**.
+- Ingests HTTP request telemetry from your app flow
+- Detects known attack patterns with explicit rules
+- Detects suspicious unknown behavior with anomaly scoring
+- Fuses rule score + anomaly score into a clear severity outcome
+- Automates response (alerting, flagging, optional auto-block)
+- Uses OpenAI for post-detection triage summaries and recommendations
+- Monitors internal exposure changes with Port Guard
 
 ---
 
-### Response and Control
+## AI in SentinelStack
 
-- Escalates high-confidence events into **alerts**  
-- Supports **automatic IP blocking** for critical activity  
-- Allows **manual operator actions** from the dashboard  
+SentinelStack is AI-powered in two layers:
+
+1) **Behavioral anomaly detection (in detection path)**
+- Feature extraction over rolling windows per source
+- Learns what normal behavior looks like, then flags unusual patterns
+- Combines fast ML checks with optional LLM advisory signal
+- Outputs `anomaly_score_norm` for explainable, deterministic fusion
+
+2) **AI triage (post-detection analyst support)**
+- Alert explanation
+- Advisory risk score
+- Recommended next actions
+
+Design policy:
+- Detection and enforcement remain deterministic and auditable
+- AI influences scoring and triage context
+- Blocking is never delegated blindly to LLM output alone
 
 ---
 
-### Exposure Monitoring (Port Guard)
+## Detection Pipeline
 
-Port Guard tracks changes in internal network exposure:
+Traffic -> Ingestion -> Behavior Features ->
+Rule Detection + AI Anomaly Detection -> Score Fusion -> Severity -> Response -> AI Triage
 
-- detects **newly opened TCP ports**  
-- maintains scan history over time  
-- surfaces unexpected services as findings  
-
-This adds **infrastructure-level visibility**, not just request-level detection.
+Key behavior signals include:
+- requests per minute
+- failed authentication ratio
+- unique endpoints
+- 4xx / 5xx ratios
+- request timing patterns
+- path entropy
+- suspicious payload frequency
+- auth endpoint concentration
 
 ---
 
-### AI-Assisted Triage
+## Severity and Response Model
 
-OpenAI is used to enrich alerts with:
-
-- contextual summaries  
-- advisory risk scoring  
-- actionable recommendations  
-
-Design principle:
-
-- **Detection & response → deterministic (rules + scoring)**  
-- **AI → interpretation and triage support**
+- **LOW**: log only
+- **MEDIUM**: log + alert
+- **HIGH**: alert + flagged
+- **CRITICAL**: alert + auto-block
 
 ---
 
@@ -77,25 +70,11 @@ Design principle:
 
 | Component | Role |
 | :-- | :-- |
-| **Next.js Dashboard** | Operator interface for metrics, alerts, and filtering |
-| **nginx** | Entry point and reverse proxy |
-| **FastAPI (logging)** | Ingest, scoring, alerts, blocking, AI enrichment |
-| **FastAPI (demo-app)** | Generates and forwards telemetry |
-| **FastAPI (portguard)** | Internal port discovery and exposure tracking |
-| **Postgres** | Persistent storage |
+| Next.js Dashboard | SOC-style UI for events, alerts, blocks, and AI status |
+| nginx | Reverse proxy + single entrypoint |
+| FastAPI logging-service | Ingestion, rule engine, anomaly scoring, fusion, response, AI enrichment |
+| FastAPI demo-app | Traffic generator / simulation app |
+| FastAPI portguard-service | Exposure monitoring and port-delta findings |
+| Postgres | Persistent event, alert, and block data |
 
 ---
-
-## Dashboard
-
-- Real-time activity and alert visibility  
-- Severity-based filtering  
-- Active block tracking  
-- Port Guard exposure history  
-
----
-
-## Run
-
-```bash
-docker compose up --build -d

@@ -27,6 +27,7 @@ CREATE TABLE IF NOT EXISTS threat_events (
     triggered_rules JSONB,
     contributing_features JSONB,
     flagged BOOLEAN NOT NULL DEFAULT FALSE,
+    detection_metadata JSONB,
     ai_advisory_score INTEGER,
     ai_recommendations TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
