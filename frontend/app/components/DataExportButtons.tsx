@@ -42,13 +42,30 @@ export default function DataExportButtons({ alertSeverity, eventSeverity }: Prop
       created_at: string;
       acknowledged: boolean;
       source_ip?: string;
+      anomaly_score_norm?: number | null;
+      severity_reason?: string | null;
+      flagged?: boolean | null;
     }>;
-    const header = ["id", "threat_event_id", "severity", "source_ip", "message", "created_at", "acknowledged"];
+    const header = [
+      "id",
+      "threat_event_id",
+      "severity",
+      "source_ip",
+      "anomaly_score_norm",
+      "flagged",
+      "severity_reason",
+      "message",
+      "created_at",
+      "acknowledged",
+    ];
     const rows = data.map((a) => [
       String(a.id),
       String(a.threat_event_id),
       a.severity,
       a.source_ip ?? "",
+      a.anomaly_score_norm != null ? String(a.anomaly_score_norm) : "",
+      a.flagged != null ? String(a.flagged) : "",
+      a.severity_reason ?? "",
       a.message,
       a.created_at,
       String(a.acknowledged),
@@ -75,6 +92,11 @@ export default function DataExportButtons({ alertSeverity, eventSeverity }: Prop
       severity: string;
       reasons: string;
       created_at: string;
+      anomaly_score_norm?: number | null;
+      severity_reason?: string | null;
+      flagged?: boolean | null;
+      triggered_rules?: unknown;
+      contributing_features?: unknown;
     }>;
     const header = [
       "id",
@@ -82,9 +104,14 @@ export default function DataExportButtons({ alertSeverity, eventSeverity }: Prop
       "event_type",
       "rule_score",
       "anomaly_score",
+      "anomaly_score_norm",
       "final_score",
       "severity",
+      "flagged",
+      "severity_reason",
       "reasons",
+      "triggered_rules",
+      "contributing_features",
       "created_at",
     ];
     const rows = data.map((e) => [
@@ -93,9 +120,14 @@ export default function DataExportButtons({ alertSeverity, eventSeverity }: Prop
       e.event_type,
       String(e.rule_score),
       String(e.anomaly_score),
+      e.anomaly_score_norm != null ? String(e.anomaly_score_norm) : "",
       String(e.final_score),
       e.severity,
+      e.flagged != null ? String(e.flagged) : "",
+      e.severity_reason ?? "",
       e.reasons,
+      e.triggered_rules != null ? JSON.stringify(e.triggered_rules) : "",
+      e.contributing_features != null ? JSON.stringify(e.contributing_features) : "",
       e.created_at,
     ]);
     downloadCsv(`sentinelstack-events-${Date.now()}.csv`, header, rows);

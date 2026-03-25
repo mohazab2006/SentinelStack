@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -37,6 +37,13 @@ class ThreatEvent(BaseModel):
     created_at: datetime
     ai_advisory_score: Optional[int] = None
     ai_recommendations: Optional[str] = None
+    source_key: Optional[str] = None
+    anomaly_score_norm: Optional[float] = None
+    features: Optional[dict[str, Any]] = None
+    triggered_rules: Optional[list] = None
+    contributing_features: Optional[list] = None
+    severity_reason: Optional[str] = None
+    flagged: Optional[bool] = None
 
 
 class Alert(BaseModel):
@@ -49,6 +56,11 @@ class Alert(BaseModel):
     source_ip: str
     ai_advisory_score: Optional[int] = None
     ai_recommendations: Optional[str] = None
+    anomaly_score_norm: Optional[float] = None
+    triggered_rules: Optional[list] = None
+    contributing_features: Optional[list] = None
+    severity_reason: Optional[str] = None
+    flagged: Optional[bool] = None
 
 
 class BlockedIp(BaseModel):
@@ -104,4 +116,12 @@ class ActivitySummary(BaseModel):
     )
     top_ips_counts_valid: bool = Field(
         description="True when top_event_ip_rows_sum ≤ events_in_window",
+    )
+
+
+class IngestResponse(BaseModel):
+    status: str
+    detection: Optional[dict[str, Any]] = Field(
+        default=None,
+        description="Present when enrich=1 or when an evaluation ran and enrich requested",
     )

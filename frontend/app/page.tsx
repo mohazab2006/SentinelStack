@@ -28,6 +28,11 @@ type Alert = {
   source_ip: string;
   ai_advisory_score?: number | null;
   ai_recommendations?: string | null;
+  anomaly_score_norm?: number | null;
+  triggered_rules?: unknown[] | null;
+  contributing_features?: unknown[] | null;
+  severity_reason?: string | null;
+  flagged?: boolean | null;
 };
 
 type ThreatEvent = {
@@ -42,6 +47,13 @@ type ThreatEvent = {
   created_at: string;
   ai_advisory_score?: number | null;
   ai_recommendations?: string | null;
+  source_key?: string | null;
+  anomaly_score_norm?: number | null;
+  features?: Record<string, unknown> | null;
+  triggered_rules?: unknown[] | null;
+  contributing_features?: unknown[] | null;
+  severity_reason?: string | null;
+  flagged?: boolean | null;
 };
 
 type BlockedIp = {
@@ -99,6 +111,20 @@ function formatDateTime(value: string) {
 
 function formatNumber(value: number) {
   return numberFormatter.format(value);
+}
+
+function formatAnomalyNorm(value: number | null | undefined) {
+  if (value == null || Number.isNaN(value)) {
+    return "—";
+  }
+  return value.toFixed(3);
+}
+
+function formatFlagged(value: boolean | null | undefined) {
+  if (value == null) {
+    return "—";
+  }
+  return value ? "yes" : "no";
 }
 
 const apiBase =
@@ -394,6 +420,9 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                 <th>Source IP</th>
                 <th>Severity</th>
                 <th>Score</th>
+                <th>Anomaly</th>
+                <th>Flagged</th>
+                <th>Why (fused)</th>
                 <th>AI advisory</th>
                 <th>Message</th>
                 <th>AI actions</th>
@@ -404,7 +433,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
             <tbody>
               {alerts.length === 0 ? (
                 <tr>
-                  <td colSpan={9} className="empty-cell">
+                  <td colSpan={12} className="empty-cell">
                     No alerts yet.
                   </td>
                 </tr>
@@ -414,6 +443,9 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                     const event = eventById.get(alert.threat_event_id);
                     const aiScore = alert.ai_advisory_score ?? event?.ai_advisory_score;
                     const aiRecs = alert.ai_recommendations ?? event?.ai_recommendations;
+                    const aNorm = alert.anomaly_score_norm ?? event?.anomaly_score_norm;
+                    const flagged = alert.flagged ?? event?.flagged;
+                    const sevReason = alert.severity_reason ?? event?.severity_reason;
                     return (
                   <tr key={alert.id}>
                     <td>{formatDateTime(alert.created_at)}</td>
@@ -424,6 +456,9 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                       </span>
                     </td>
                     <td className="mono">{event ? event.final_score : "n/a"}</td>
+                    <td className="mono">{formatAnomalyNorm(aNorm)}</td>
+                    <td className="mono">{formatFlagged(flagged)}</td>
+                    <td className="why-cell">{sevReason ?? "—"}</td>
                     <td className="mono">
                       {aiScore != null ? aiScore : "—"}
                     </td>
@@ -467,10 +502,13 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                 <th>Type</th>
                 <th>Severity</th>
                 <th>Rule</th>
-                <th>Anomaly</th>
+                <th>Anomaly (0–100)</th>
+                <th>A_norm</th>
                 <th>Final</th>
+                <th>Flagged</th>
                 <th>AI adv.</th>
-                <th>Why</th>
+                <th>Signals</th>
+                <th>Severity reason</th>
                 <th>AI actions</th>
                 <th>Block</th>
               </tr>
@@ -478,7 +516,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
             <tbody>
               {events.length === 0 ? (
                 <tr>
-                  <td colSpan={11} className="empty-cell">
+                  <td colSpan={14} className="empty-cell">
                     No threat events yet.
                   </td>
                 </tr>
@@ -495,9 +533,12 @@ export default async function HomePage({ searchParams }: HomePageProps) {
                     </td>
                     <td className="mono">{event.rule_score}</td>
                     <td className="mono">{event.anomaly_score}</td>
+                    <td className="mono">{formatAnomalyNorm(event.anomaly_score_norm)}</td>
                     <td className="mono">{event.final_score}</td>
+                    <td className="mono">{formatFlagged(event.flagged)}</td>
                     <td className="mono">{event.ai_advisory_score ?? "—"}</td>
                     <td>{event.reasons}</td>
+                    <td className="why-cell">{event.severity_reason ?? "—"}</td>
                     <td className="ai-recs-cell">{event.ai_recommendations ?? "—"}</td>
                     <td>
                       <IpBlockButton

@@ -1,18 +1,26 @@
 import os
 from datetime import datetime, timezone
-from typing import Annotated, List, Optional
+from typing import Annotated, Any, List, Optional
 
 from fastapi import FastAPI, Header, HTTPException, Query
 
 from .ai_insights import AlertAiBundle, fetch_alert_ai_bundle
-from .anomaly import compute_anomaly
+from .anomaly_scorer import compute_behavioral_anomaly
 from .db import close_pool, get_pool
+from .fusion import (
+    ANOMALY_EVENT_THRESHOLD,
+    fuse_scores,
+    legacy_anomaly_integer,
+    score_to_band,
+    should_create_event,
+)
 from .schemas import (
     ActivitySummary,
     Alert,
     BlockedIp,
     BlockIpRequest,
     IngestRequest,
+    IngestResponse,
     PortguardIngestRequest,
     PortguardNewPortItem,
     RequestLog,
@@ -41,10 +49,9 @@ REPEATED_404_THRESHOLD = env_int("REPEATED_404_THRESHOLD", 8)
 REPEATED_404_SCORE = env_int("REPEATED_404_SCORE", 20)
 SENSITIVE_PROBE_THRESHOLD = env_int("SENSITIVE_PROBE_THRESHOLD", 3)
 SENSITIVE_PROBE_SCORE = env_int("SENSITIVE_PROBE_SCORE", 25)
-LOW_MAX = env_int("LOW_MAX", 29)
-MEDIUM_MAX = env_int("MEDIUM_MAX", 59)
-HIGH_MAX = env_int("HIGH_MAX", 79)
 AUTO_BLOCK_MINUTES = env_int("AUTO_BLOCK_MINUTES", 60)
+BEHAVIOR_WINDOW_MINUTES = env_int("BEHAVIOR_WINDOW_MINUTES", 5)
+BEHAVIOR_MIN_SAMPLES = env_int("BEHAVIOR_MIN_SAMPLES", 5)
 PORTGUARD_WEBHOOK_SECRET = os.getenv("PORTGUARD_WEBHOOK_SECRET", "").strip()
 PORTGUARD_ALERT_DEDUPE_MINUTES = env_int("PORTGUARD_ALERT_DEDUPE_MINUTES", 45)
 
@@ -146,6 +153,48 @@ async def startup() -> None:
         )
         await conn.execute(
             """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS source_key VARCHAR(128);
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS anomaly_score_norm DOUBLE PRECISION;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS features JSONB;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS triggered_rules JSONB;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS contributing_features JSONB;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS severity_reason TEXT;
+            """
+        )
+        await conn.execute(
+            """
+            ALTER TABLE threat_events
+            ADD COLUMN IF NOT EXISTS flagged BOOLEAN NOT NULL DEFAULT FALSE;
+            """
+        )
+        await conn.execute(
+            """
             CREATE TABLE IF NOT EXISTS alerts (
                 id SERIAL PRIMARY KEY,
                 threat_event_id INTEGER NOT NULL REFERENCES threat_events(id) ON DELETE CASCADE,
@@ -192,10 +241,15 @@ async def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/ingest-request")
-async def ingest_request(payload: IngestRequest) -> dict[str, str]:
+@app.post("/ingest-request", response_model=IngestResponse)
+async def ingest_request(
+    payload: IngestRequest,
+    enrich: int = Query(0, ge=0, le=1, description="If 1, include detection summary in response"),
+) -> IngestResponse:
     pool = await get_pool()
     timestamp = payload.timestamp or datetime.now(timezone.utc)
+    detection_payload: Optional[dict[str, Any]] = None
+
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute(
             """
@@ -210,89 +264,172 @@ async def ingest_request(payload: IngestRequest) -> dict[str, str]:
             payload.response_time_ms,
             timestamp,
         )
-        rule_score, reasons, event_type = await evaluate_rules(conn, payload.ip_address)
-        if rule_score > 0:
-            anomaly_score, anomaly_reasons = await compute_anomaly(conn, payload.ip_address)
-            final_score = min(100, rule_score + anomaly_score)
-            all_reasons = list(reasons)
-            if anomaly_reasons:
-                all_reasons.extend([f"anomaly: {r}" for r in anomaly_reasons])
-            severity = score_to_severity(final_score)
-            # Avoid alert storms by suppressing duplicates for the same rule/IP over 2 minutes.
-            duplicate = await conn.fetchval(
-                """
-                SELECT id FROM threat_events
-                WHERE ip_address = $1
-                  AND event_type = $2
-                  AND final_score >= $3
-                  AND created_at >= NOW() - INTERVAL '2 minutes'
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                payload.ip_address,
-                event_type,
-                final_score,
+        rule_score, reasons, event_type, triggered_rules = await evaluate_rules(conn, payload.ip_address)
+        feature_snap, anomaly_result = await compute_behavioral_anomaly(
+            conn,
+            payload.ip_address,
+            BEHAVIOR_WINDOW_MINUTES,
+            BEHAVIOR_MIN_SAMPLES,
+        )
+        anomaly_norm = anomaly_result.anomaly_score_norm
+        contrib = anomaly_result.contributing_features
+        anomaly_score_int = legacy_anomaly_integer(anomaly_norm)
+
+        if not should_create_event(rule_score, anomaly_norm):
+            if enrich:
+                detection_payload = {
+                    "evaluated": True,
+                    "event_created": False,
+                    "rule_score": rule_score,
+                    "anomaly_score_norm": anomaly_norm,
+                    "anomaly_score": anomaly_score_int,
+                    "threshold": ANOMALY_EVENT_THRESHOLD,
+                    "triggered_rules": triggered_rules,
+                    "contributing_features": contrib,
+                }
+            return IngestResponse(status="logged", detection=detection_payload)
+
+        resolved_event_type = event_type
+        if rule_score <= 0 and anomaly_norm >= ANOMALY_EVENT_THRESHOLD:
+            resolved_event_type = "behavioral_anomaly"
+
+        fusion = fuse_scores(rule_score, anomaly_norm)
+        severity = fusion.severity
+        final_score = fusion.fused_score
+        flagged = fusion.flagged
+
+        contrib_bits = [
+            f"{c['name']} z={c['z']}"
+            for c in contrib[:5]
+        ]
+        all_reasons: list[str] = list(reasons)
+        if contrib_bits:
+            all_reasons.append("behavioral: " + ", ".join(contrib_bits))
+        reasons_text = "; ".join(all_reasons) if all_reasons else fusion.severity_reason
+
+        features_json = None if feature_snap.insufficient_sample else feature_snap.to_json_dict()
+
+        duplicate = await conn.fetchval(
+            """
+            SELECT id FROM threat_events
+            WHERE ip_address = $1
+              AND event_type = $2
+              AND final_score >= $3
+              AND created_at >= NOW() - INTERVAL '2 minutes'
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            payload.ip_address,
+            resolved_event_type,
+            final_score,
+        )
+        if duplicate is not None:
+            if enrich:
+                detection_payload = {
+                    "evaluated": True,
+                    "event_created": False,
+                    "deduped": True,
+                    "rule_score": rule_score,
+                    "anomaly_score_norm": anomaly_norm,
+                    "fused_score": final_score,
+                    "severity": severity,
+                    "event_type": resolved_event_type,
+                    "triggered_rules": triggered_rules,
+                    "contributing_features": contrib,
+                }
+            return IngestResponse(status="logged", detection=detection_payload)
+
+        bundle: Optional[AlertAiBundle] = None
+        ai_advisory: Optional[int] = None
+        ai_recs: Optional[str] = None
+        if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
+            bundle = await fetch_alert_ai_bundle(
+                subject=f"IP {payload.ip_address}",
+                event_type=resolved_event_type,
+                severity=severity,
+                reasons_text=reasons_text,
+                rule_score=rule_score,
+                anomaly_score=anomaly_score_int,
+                final_score=final_score,
             )
-            if duplicate is None:
-                reasons_text = "; ".join(all_reasons)
-                bundle: Optional[AlertAiBundle] = None
-                ai_advisory: Optional[int] = None
-                ai_recs: Optional[str] = None
-                if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
-                    bundle = await fetch_alert_ai_bundle(
-                        subject=f"IP {payload.ip_address}",
-                        event_type=event_type,
-                        severity=severity,
-                        reasons_text=reasons_text,
-                        rule_score=rule_score,
-                        anomaly_score=anomaly_score,
-                        final_score=final_score,
-                    )
-                    if bundle:
-                        ai_advisory = bundle.advisory_score
-                        ai_recs = bundle.recommendations
-                event_id = await conn.fetchval(
-                    """
-                    INSERT INTO threat_events (
-                        ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons,
-                        ai_advisory_score, ai_recommendations
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-                    RETURNING id
-                    """,
-                    payload.ip_address,
-                    event_type,
-                    rule_score,
-                    anomaly_score,
-                    final_score,
-                    severity,
-                    reasons_text,
-                    ai_advisory,
-                    ai_recs,
-                )
-                if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
-                    message = f"{severity} threat from {payload.ip_address}: " + reasons_text
-                    if bundle and bundle.explanation:
-                        message += f" | AI: {bundle.explanation}"
-                    alert_id = await conn.fetchval(
-                        """
-                        INSERT INTO alerts (threat_event_id, severity, message)
-                        VALUES ($1, $2, $3)
-                        RETURNING id
-                        """,
-                        event_id,
-                        severity,
-                        message,
-                    )
-                    await _maybe_auto_ack_alert(conn, int(alert_id), bundle)
-                if severity == "CRITICAL":
-                    await block_ip_in_db(
-                        conn=conn,
-                        ip_address=payload.ip_address,
-                        reason=f"auto-block: {reasons_text}",
-                        duration_minutes=AUTO_BLOCK_MINUTES,
-                    )
-    return {"status": "logged"}
+            if bundle:
+                ai_advisory = bundle.advisory_score
+                ai_recs = bundle.recommendations
+
+        event_id = await conn.fetchval(
+            """
+            INSERT INTO threat_events (
+                ip_address, source_key, event_type, rule_score, anomaly_score, anomaly_score_norm,
+                final_score, severity, reasons, severity_reason, features, triggered_rules,
+                contributing_features, flagged, ai_advisory_score, ai_recommendations
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            RETURNING id
+            """,
+            payload.ip_address,
+            payload.ip_address,
+            resolved_event_type,
+            rule_score,
+            anomaly_score_int,
+            anomaly_norm,
+            final_score,
+            severity,
+            reasons_text,
+            fusion.severity_reason,
+            features_json,
+            triggered_rules,
+            contrib,
+            flagged,
+            ai_advisory,
+            ai_recs,
+        )
+
+        if severity in {"MEDIUM", "HIGH", "CRITICAL"}:
+            message = (
+                f"{severity} threat from {payload.ip_address}: {reasons_text}"
+                f" | severity_reason: {fusion.severity_reason}"
+            )
+            if bundle and bundle.explanation:
+                message += f" | AI: {bundle.explanation}"
+            alert_id = await conn.fetchval(
+                """
+                INSERT INTO alerts (threat_event_id, severity, message)
+                VALUES ($1, $2, $3)
+                RETURNING id
+                """,
+                event_id,
+                severity,
+                message,
+            )
+            await _maybe_auto_ack_alert(conn, int(alert_id), bundle)
+
+        if severity == "CRITICAL":
+            await block_ip_in_db(
+                conn=conn,
+                ip_address=payload.ip_address,
+                reason=f"auto-block: {reasons_text}",
+                duration_minutes=AUTO_BLOCK_MINUTES,
+            )
+
+        if enrich:
+            detection_payload = {
+                "evaluated": True,
+                "event_created": True,
+                "event_id": int(event_id),
+                "rule_score": rule_score,
+                "anomaly_score_norm": anomaly_norm,
+                "anomaly_score": anomaly_score_int,
+                "fused_score": final_score,
+                "severity": severity,
+                "flagged": flagged,
+                "event_type": resolved_event_type,
+                "triggered_rules": triggered_rules,
+                "contributing_features": contrib,
+                "severity_reason": fusion.severity_reason,
+                "features": features_json,
+            }
+
+    return IngestResponse(status="logged", detection=detection_payload)
 
 
 def _portguard_items_score(items: List[PortguardNewPortItem]) -> int:
@@ -327,11 +464,20 @@ async def ingest_portguard(
         raise HTTPException(status_code=401, detail="Invalid or missing X-Portguard-Token")
 
     rule_score = _portguard_items_score(payload.new_ports)
-    severity = score_to_severity(rule_score)
+    severity = score_to_band(rule_score)
     ports_line = _portguard_reasons_line(payload.new_ports)
     reasons = f"target={payload.target} | {ports_line}"
     pseudo_ip = f"portguard:{payload.target}"[:64]
     event_type = "portguard_new_ports"
+    portguard_triggered = [
+        {
+            "id": "portguard_new_ports",
+            "detail": ports_line[:512],
+            "points": rule_score,
+        }
+    ]
+    flagged_pg = severity in {"HIGH", "CRITICAL"}
+    severity_reason_pg = f"Port Guard rule_score={rule_score} mapped to {severity}"
 
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
@@ -373,17 +519,23 @@ async def ingest_portguard(
         event_id = await conn.fetchval(
             """
             INSERT INTO threat_events (
-                ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons,
-                ai_advisory_score, ai_recommendations
+                ip_address, source_key, event_type, rule_score, anomaly_score, anomaly_score_norm,
+                final_score, severity, reasons, severity_reason, features, triggered_rules,
+                contributing_features, flagged, ai_advisory_score, ai_recommendations
             )
-            VALUES ($1, $2, $3, 0, $3, $4, $5, $6, $7)
+            VALUES ($1, $2, $3, $4, 0, 0.0, $5, $6, $7, $8, NULL, $9, NULL, $10, $11, $12)
             RETURNING id
             """,
             pseudo_ip,
+            pseudo_ip,
             event_type,
+            rule_score,
             rule_score,
             severity,
             reasons,
+            severity_reason_pg,
+            portguard_triggered,
+            flagged_pg,
             ai_advisory,
             ai_recs,
         )
@@ -440,7 +592,9 @@ async def get_events(
             rows = await conn.fetch(
                 """
                 SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at,
-                       ai_advisory_score, ai_recommendations
+                       ai_advisory_score, ai_recommendations,
+                       source_key, anomaly_score_norm, features, triggered_rules, contributing_features,
+                       severity_reason, flagged
                 FROM threat_events
                 WHERE severity = $1
                 ORDER BY created_at DESC
@@ -453,7 +607,9 @@ async def get_events(
             rows = await conn.fetch(
                 """
                 SELECT id, ip_address, event_type, rule_score, anomaly_score, final_score, severity, reasons, created_at,
-                       ai_advisory_score, ai_recommendations
+                       ai_advisory_score, ai_recommendations,
+                       source_key, anomaly_score_norm, features, triggered_rules, contributing_features,
+                       severity_reason, flagged
                 FROM threat_events
                 ORDER BY created_at DESC
                 LIMIT $1
@@ -476,7 +632,9 @@ async def get_alerts(
                 """
                 SELECT a.id, a.threat_event_id, a.severity, a.message, a.created_at, a.acknowledged,
                        t.ai_advisory_score, t.ai_recommendations,
-                       t.ip_address AS source_ip
+                       t.ip_address AS source_ip,
+                       t.anomaly_score_norm, t.triggered_rules, t.contributing_features,
+                       t.severity_reason, t.flagged
                 FROM alerts a
                 INNER JOIN threat_events t ON t.id = a.threat_event_id
                 WHERE a.severity = $1
@@ -491,7 +649,9 @@ async def get_alerts(
                 """
                 SELECT a.id, a.threat_event_id, a.severity, a.message, a.created_at, a.acknowledged,
                        t.ai_advisory_score, t.ai_recommendations,
-                       t.ip_address AS source_ip
+                       t.ip_address AS source_ip,
+                       t.anomaly_score_norm, t.triggered_rules, t.contributing_features,
+                       t.severity_reason, t.flagged
                 FROM alerts a
                 INNER JOIN threat_events t ON t.id = a.threat_event_id
                 ORDER BY a.created_at DESC
@@ -706,19 +866,10 @@ async def get_activity_summary(
     )
 
 
-def score_to_severity(score: int) -> str:
-    if score > HIGH_MAX:
-        return "CRITICAL"
-    if score > MEDIUM_MAX:
-        return "HIGH"
-    if score > LOW_MAX:
-        return "MEDIUM"
-    return "LOW"
-
-
-async def evaluate_rules(conn, ip_address: str) -> tuple[int, list[str], str]:
+async def evaluate_rules(conn, ip_address: str) -> tuple[int, list[str], str, list[dict[str, Any]]]:
     score = 0
     reasons: list[str] = []
+    triggered: list[dict[str, Any]] = []
     event_type = "suspicious_activity"
 
     failed_logins = await conn.fetchval(
@@ -735,7 +886,9 @@ async def evaluate_rules(conn, ip_address: str) -> tuple[int, list[str], str]:
     )
     if failed_logins >= FAILED_LOGIN_THRESHOLD:
         score += FAILED_LOGIN_SCORE
-        reasons.append(f"failed login burst ({failed_logins} in 5m)")
+        detail = f"failed login burst ({failed_logins} in 5m)"
+        reasons.append(detail)
+        triggered.append({"id": "failed_login_burst", "detail": detail, "points": FAILED_LOGIN_SCORE})
         event_type = "brute_force"
 
     repeated_404 = await conn.fetchval(
@@ -750,7 +903,9 @@ async def evaluate_rules(conn, ip_address: str) -> tuple[int, list[str], str]:
     )
     if repeated_404 >= REPEATED_404_THRESHOLD:
         score += REPEATED_404_SCORE
-        reasons.append(f"repeated 404 probing ({repeated_404} in 5m)")
+        detail = f"repeated 404 probing ({repeated_404} in 5m)"
+        reasons.append(detail)
+        triggered.append({"id": "repeated_404", "detail": detail, "points": REPEATED_404_SCORE})
         if event_type == "suspicious_activity":
             event_type = "recon_404_probe"
 
@@ -765,7 +920,9 @@ async def evaluate_rules(conn, ip_address: str) -> tuple[int, list[str], str]:
     )
     if request_spike >= REQUEST_SPIKE_THRESHOLD:
         score += REQUEST_SPIKE_SCORE
-        reasons.append(f"request spike ({request_spike} in 1m)")
+        detail = f"request spike ({request_spike} in 1m)"
+        reasons.append(detail)
+        triggered.append({"id": "request_spike", "detail": detail, "points": REQUEST_SPIKE_SCORE})
         if event_type == "suspicious_activity":
             event_type = "request_spike"
 
@@ -782,13 +939,15 @@ async def evaluate_rules(conn, ip_address: str) -> tuple[int, list[str], str]:
     )
     if sensitive_unauthorized >= SENSITIVE_PROBE_THRESHOLD:
         score += SENSITIVE_PROBE_SCORE
-        reasons.append(f"sensitive route probing ({sensitive_unauthorized} unauthorized attempts)")
+        detail = f"sensitive route probing ({sensitive_unauthorized} unauthorized attempts)"
+        reasons.append(detail)
+        triggered.append({"id": "sensitive_route_probe", "detail": detail, "points": SENSITIVE_PROBE_SCORE})
         if event_type == "suspicious_activity":
             event_type = "sensitive_route_probe"
 
     if score > 100:
         score = 100
-    return score, reasons, event_type
+    return score, reasons, event_type, triggered
 
 
 async def deactivate_expired_blocks(conn) -> None:

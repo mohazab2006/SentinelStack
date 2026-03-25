@@ -14,12 +14,21 @@ CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs (timestamp
 CREATE TABLE IF NOT EXISTS threat_events (
     id SERIAL PRIMARY KEY,
     ip_address VARCHAR(64) NOT NULL,
+    source_key VARCHAR(128),
     event_type VARCHAR(64) NOT NULL,
     rule_score INTEGER NOT NULL DEFAULT 0,
     anomaly_score INTEGER NOT NULL DEFAULT 0,
+    anomaly_score_norm DOUBLE PRECISION,
     final_score INTEGER NOT NULL,
     severity VARCHAR(16) NOT NULL,
     reasons TEXT NOT NULL,
+    severity_reason TEXT,
+    features JSONB,
+    triggered_rules JSONB,
+    contributing_features JSONB,
+    flagged BOOLEAN NOT NULL DEFAULT FALSE,
+    ai_advisory_score INTEGER,
+    ai_recommendations TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
