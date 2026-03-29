@@ -4,6 +4,8 @@ SentinelStack is a Dockerized cyber security platform that combines deterministi
 
 It is built to feel like a real SOC workflow: ingest traffic, extract behavior, detect threats, fuse scores, trigger response, and provide explainable alert context.
 
+**How to run it locally:** see [RUN.md](RUN.md) for prerequisites, environment setup, Docker Compose commands, URLs, and troubleshooting.
+
 ---
 
 ## What SentinelStack Does
