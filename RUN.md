@@ -40,7 +40,25 @@ First start may take several minutes while images build. Wait until all services
 
 Postgres is exposed on host port **5432** for local tools if you need direct DB access.
 
-## 4. Stop the stack
+## 4. Optional: Next.js on the host (`next dev`) with Docker backends
+
+If you run the dashboard with `npm run dev` in `./frontend` while APIs stay in Compose, the server must not use Docker-only hostnames (`logging-service`, etc.). With **nginx and the backends up** on [http://localhost:8080](http://localhost:8080), the frontend is already configured for development:
+
+- **Server-side** data loads use `http://127.0.0.1:8080/api/logging` and `.../api/portguard` automatically when `NODE_ENV=development`.
+- **Browser** calls to `/api/logging/*` and `/api/portguard/*` are handled by **Next route handlers** (dev only) that proxy to the same nginx URLs.
+
+If nginx uses another host port (e.g. `9080:80`), set before `npm run dev`:
+
+```bash
+set SENTINELSTACK_DEV_PROXY=http://127.0.0.1:9080   # Windows CMD
+# PowerShell: $env:SENTINELSTACK_DEV_PROXY="http://127.0.0.1:9080"
+```
+
+Or set `LOGGING_API_BASE_URL` / `PORTGUARD_API_BASE_URL` to full bases such as `http://127.0.0.1:8080/api/logging`.
+
+**Checklist:** `docker compose up` running → open [http://localhost:3000](http://localhost:3000) for the dev server, or [http://localhost:8080](http://localhost:8080) for the full stack UI behind nginx.
+
+## 5. Stop the stack
 
 Press `Ctrl+C` in the terminal where Compose is running, or in another shell from the repo root:
 
@@ -54,7 +72,7 @@ To remove the named volume and reset the database:
 docker compose down -v
 ```
 
-## 5. Optional: validate the logging API (Windows)
+## 6. Optional: validate the logging API (Windows)
 
 With the stack up, from the repo root in PowerShell:
 
@@ -64,7 +82,7 @@ With the stack up, from the repo root in PowerShell:
 
 By default this calls `http://localhost:8080/api/logging`. Override the base URL with `SENTINELSTACK_URL` if needed.
 
-## Troubleshooting
+## 7. Troubleshooting
 
 - **Port 8080 in use:** change the host mapping in `docker-compose.yml` under the `nginx` service (`"8080:80"` → e.g. `"9080:80"`) and open `http://localhost:9080`.
 - **Port 5432 in use:** adjust the `postgres` ports mapping or stop the conflicting Postgres instance.

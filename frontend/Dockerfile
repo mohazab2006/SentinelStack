@@ -4,6 +4,7 @@ WORKDIR /app
 
 COPY package.json tsconfig.json next-env.d.ts next.config.js ./
 COPY app ./app
+COPY public ./public
 
 RUN npm install
 RUN npm run build

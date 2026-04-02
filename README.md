@@ -1,4 +1,4 @@
-# SentinelStack AI
+# SentinelStack
 
 SentinelStack is a Dockerized cyber security platform that combines deterministic detections with behavioral AI signals and analyst-facing AI triage.
 
@@ -80,3 +80,7 @@ Key behavior signals include:
 | Postgres | Persistent event, alert, and block data |
 
 ---
+
+## Running SentinelStack
+
+For step-by-step local setup (environment file, Compose, URLs, optional `next dev`, troubleshooting), see **[RUN.md](RUN.md)**.

@@ -7,6 +7,8 @@ import TableSeverityFilters from "./components/TableSeverityFilters";
 import DataExportButtons from "./components/DataExportButtons";
 import IpBlockButton from "./components/IpBlockButton";
 import AiInsightsBanner from "./components/AiInsightsBanner";
+import SiteLogo from "./components/SiteLogo";
+import { formatDateTime } from "./lib/formatDateTime";
 
 type RequestLog = {
   id: number;
@@ -108,10 +110,6 @@ type PortguardScheduleStatus = {
 
 const numberFormatter = new Intl.NumberFormat();
 
-function formatDateTime(value: string) {
-  return new Date(value).toLocaleString();
-}
-
 function formatNumber(value: number) {
   return numberFormatter.format(value);
 }
@@ -130,11 +128,31 @@ function formatFlagged(value: boolean | null | undefined) {
   return value ? "yes" : "no";
 }
 
-const apiBase =
-  process.env.LOGGING_API_BASE_URL || "http://logging-service:8000";
+function trimTrailingSlash(url: string) {
+  return url.replace(/\/$/, "");
+}
 
-const portguardApiBase =
-  process.env.PORTGUARD_API_BASE_URL || "http://portguard-service:8000";
+/**
+ * In Docker, call services by name on :8000. On the host (`next dev`), call through nginx so paths
+ * match `/api/logging/...` (see repo nginx.conf). Override with LOGGING_API_BASE_URL / PORTGUARD_API_BASE_URL.
+ */
+const devStackOrigin = trimTrailingSlash(
+  process.env.SENTINELSTACK_DEV_PROXY || "http://127.0.0.1:8080"
+);
+
+const apiBase = trimTrailingSlash(
+  process.env.LOGGING_API_BASE_URL ||
+    (process.env.NODE_ENV === "development"
+      ? `${devStackOrigin}/api/logging`
+      : "http://logging-service:8000")
+);
+
+const portguardApiBase = trimTrailingSlash(
+  process.env.PORTGUARD_API_BASE_URL ||
+    (process.env.NODE_ENV === "development"
+      ? `${devStackOrigin}/api/portguard`
+      : "http://portguard-service:8000")
+);
 
 function parseAllowedTargets(): string[] {
   const raw = process.env.PORTGUARD_ALLOWED_TARGETS || "demo-app,nginx,postgres,logging-service";
@@ -355,11 +373,14 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   const allowedTargets = parseAllowedTargets();
   const portguardDefaultTarget = defaultPortguardTarget();
 
-  const metrics = [
-    { label: "Total Requests", value: overview.total_requests, tone: "neutral" },
-    { label: "Threat Events", value: overview.total_events, tone: "warn" },
-    { label: "Open Alerts", value: overview.open_alerts, tone: "danger" },
-    { label: "Active Blocks", value: overview.active_blocks, tone: "danger" },
+  const overviewMetrics = [
+    { label: "Total requests", value: overview.total_requests, tone: "neutral" },
+    { label: "Threat events", value: overview.total_events, tone: "warn" },
+    { label: "Open alerts", value: overview.open_alerts, tone: "danger" },
+    { label: "Active blocks", value: overview.active_blocks, tone: "danger" }
+  ];
+
+  const severityMetrics = [
     { label: "Low", value: severity.LOW, tone: "low" },
     { label: "Medium", value: severity.MEDIUM, tone: "medium" },
     { label: "High", value: severity.HIGH, tone: "high" },
@@ -367,13 +388,26 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   ];
 
   return (
-    <main className="dashboard-page">
-      <header className="dashboard-header">
-        <h1>SentinelStack Dashboard</h1>
-        <DashboardRefreshBar />
-      </header>
-      <AiInsightsBanner />
-      {loadErrors.length > 0 ? (
+    <div className="app-shell">
+      <div className="app-shell-bg" aria-hidden="true" />
+      <main className="dashboard-page">
+        <header className="site-header">
+          <div className="site-header-main">
+            <div className="site-brand-shell" aria-label="SentinelStack">
+              <SiteLogo />
+              <span className="site-brand-divider" aria-hidden="true" />
+              <div className="site-brand-text">
+                <h1 className="site-title">Security overview</h1>
+                <p className="site-tagline">
+                  Live requests, detections, and enforcement — unified in one place.
+                </p>
+              </div>
+            </div>
+            <DashboardRefreshBar />
+          </div>
+        </header>
+        <AiInsightsBanner />
+        {loadErrors.length > 0 ? (
         <section className="card load-warning" aria-live="polite">
           <h2>Partial Data</h2>
           <p>Some services are still starting or temporarily unavailable.</p>
@@ -383,16 +417,36 @@ export default async function HomePage({ searchParams }: HomePageProps) {
             ))}
           </ul>
         </section>
-      ) : null}
+        ) : null}
 
-      <section className="metrics-grid" aria-label="Overview metrics">
-        {metrics.map((metric) => (
-          <article key={metric.label} className={`metric-card metric-${metric.tone}`}>
-            <span className="metric-label">{metric.label}</span>
-            <strong className="metric-value">{formatNumber(metric.value)}</strong>
-          </article>
-        ))}
-      </section>
+        <div className="metrics-stack" aria-label="Key metrics">
+        <section className="metrics-group" aria-labelledby="metrics-overview-heading">
+          <h2 id="metrics-overview-heading" className="section-heading">
+            Platform snapshot
+          </h2>
+          <div className="metrics-grid metrics-grid-primary">
+            {overviewMetrics.map((metric) => (
+              <article key={metric.label} className={`metric-card metric-${metric.tone}`}>
+                <span className="metric-label">{metric.label}</span>
+                <strong className="metric-value">{formatNumber(metric.value)}</strong>
+              </article>
+            ))}
+          </div>
+        </section>
+        <section className="metrics-group" aria-labelledby="metrics-severity-heading">
+          <h2 id="metrics-severity-heading" className="section-heading">
+            Events by severity
+          </h2>
+          <div className="metrics-grid metrics-grid-severity">
+            {severityMetrics.map((metric) => (
+              <article key={metric.label} className={`metric-card metric-${metric.tone}`}>
+                <span className="metric-label">{metric.label}</span>
+                <strong className="metric-value">{formatNumber(metric.value)}</strong>
+              </article>
+            ))}
+          </div>
+        </section>
+      </div>
 
       <SummaryPanel />
 
@@ -642,6 +696,7 @@ export default async function HomePage({ searchParams }: HomePageProps) {
           </table>
         </div>
       </section>
-    </main>
+      </main>
+    </div>
   );
 }

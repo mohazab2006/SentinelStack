@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { formatDateTime } from "../lib/formatDateTime";
 
 type OpenPortSummary = {
   port: number;
@@ -40,10 +41,6 @@ type Props = {
   defaultTarget: string;
   schedule: PortguardScheduleStatus;
 };
-
-function formatDateTime(value: string) {
-  return new Date(value).toLocaleString();
-}
 
 export default function PortGuardSection({ scans, allowedTargets, defaultTarget, schedule }: Props) {
   const [liveScans, setLiveScans] = useState(scans);
