@@ -1,69 +1,26 @@
 # SentinelStack
 
-SentinelStack is a Dockerized AI cybersecurity platform that simulates a real Security Operations Center (SOC) workflow. It ingests traffic, analyzes behavior, detects threats, fuses risk signals, automates response, and provides explainable AI-assisted triage.
+**AI cybersecurity platform for real-time threat detection, intelligent triage, and automated response.**
+
+SentinelStack implements a full Security Operations Center (SOC) pipeline — from raw traffic ingestion to LLM-assisted alert triage — combining deterministic rule-based detection with machine learning anomaly detection.
 
 ---
 
-## 🚀 Overview
+## Pipeline
 
-SentinelStack is engineered to replicate how modern SOC systems operate:
-
-**Traffic → Detection → Scoring → Response → Triage**
-
-It combines deterministic security logic with machine learning and AI to create a transparent, scalable, and production-style cybersecurity pipeline.
+Traffic → Ingestion → Feature Extraction → Rule Detection + Anomaly Detection → Score Fusion → Severity Classification → Automated Response → LLM Triage
 
 ---
 
-## 🧠 What SentinelStack Does
+## Detection Engine
 
-- Ingests HTTP request telemetry from application traffic
-- Detects known threats using rule-based detection
-- Identifies unknown threats using anomaly detection (Isolation Forest)
-- Fuses multiple risk signals into a unified severity score
-- Automates response workflows (alerting, flagging, optional IP blocking)
-- Provides AI-generated alert summaries, risk insights, and recommendations
-- Monitors infrastructure exposure changes using Port Guard
+SentinelStack uses two detection layers that run in parallel and feed into a unified score fusion engine.
 
----
+**Rule-Based Detection**
+Deterministic detection of known attack patterns — brute force, port scanning, malformed payloads, authentication flooding. Fast, auditable, no false negatives on known signatures.
 
-## ⚙️ Core Capabilities
-
-### 1. Rule-Based Detection
-- Detects known attack patterns (e.g., brute force, scanning, malformed payloads)
-- Fully deterministic and auditable
-- Fast and reliable for known threat signatures
-
-### 2. Behavioral Anomaly Detection
-- Extracts behavioral features over rolling time windows per source
-- Uses **Isolation Forest (scikit-learn)** for anomaly detection
-- Learns baseline behavior and flags deviations
-- Outputs normalized anomaly scores (`anomaly_score_norm`)
-
-### 3. Score Fusion Engine
-- Combines:
-  - Rule-based detection score
-  - Anomaly detection score
-- Produces final severity classification:
-  - LOW
-  - MEDIUM
-  - HIGH
-  - CRITICAL
-
----
-
-## 🔄 Detection Pipeline
-Traffic:
-→ Ingestion
-→ Feature Extraction
-→ Rule Detection + Anomaly Detection (Isolation Forest)
-→ Score Fusion
-→ Severity Classification
-→ Automated Response
-→ AI Triage (LLM)
-
----
-
-## 📊 Behavior Signals Used
+**Behavioral Anomaly Detection (Isolation Forest)**
+Extracts 8 behavioral signals per source IP over rolling time windows:
 
 - Requests per minute
 - Failed authentication ratio
@@ -74,87 +31,52 @@ Traffic:
 - Suspicious payload frequency
 - Authentication endpoint concentration
 
----
+These features feed an Isolation Forest model (scikit-learn) that learns baseline behavior and flags statistical deviations as normalized anomaly scores.
 
-## 🚨 Severity & Response Model
+**Score Fusion Engine**
+Combines rule-based and anomaly scores into a unified severity classification:
 
-| Severity  | Action                          |
-|----------|---------------------------------|
-| LOW      | Log only                        |
-| MEDIUM   | Log + alert                     |
-| HIGH     | Alert + flagged                 |
-| CRITICAL | Alert + auto-block (optional)   |
-
----
-
-## 🤖 AI in SentinelStack
-
-SentinelStack uses AI in **two controlled layers**:
-
-### 1. Behavioral Detection (Real-Time)
-- Isolation Forest anomaly detection
-- Fast, explainable scoring
-- Optional LLM advisory signal (non-blocking)
-
-### 2. AI Triage (Post-Detection)
-- Generates alert summaries
-- Provides contextual risk scoring
-- Recommends next actions
-
-### 🔒 Design Principles
-
-- Detection and enforcement remain deterministic
-- AI enhances insights, not control
-- Blocking decisions are never based solely on LLM output
+| Severity | Automated Action |
+|---|---|
+| LOW | Log only |
+| MEDIUM | Log + alert |
+| HIGH | Alert + flag |
+| CRITICAL | Alert + optional auto-block |
 
 ---
 
-## 🏗️ Architecture
+## AI Design Principles
 
-| Component                  | Role                                                                 |
-|---------------------------|----------------------------------------------------------------------|
-| Next.js Dashboard         | SOC-style UI for events, alerts, and system visibility              |
-| nginx                     | Reverse proxy and single entry point                                |
-| FastAPI logging-service   | Ingestion, detection, scoring, response, AI enrichment              |
-| FastAPI demo-app          | Traffic simulation and testing                                      |
-| FastAPI portguard-service | Monitors exposure and port changes                                  |
-| PostgreSQL                | Stores events, alerts, and block data                               |
+Detection and enforcement are fully deterministic. The LLM layer runs post-detection only — it generates alert summaries, contextual risk explanations, and recommended next actions. Blocking decisions are never based on LLM output alone.
 
 ---
 
-## ✨ Key Features
+## Architecture
 
-- Full SOC pipeline simulation
-- Hybrid detection (rules + ML)
-- Isolation Forest anomaly detection (scikit-learn)
-- Real-time scoring and automated response
-- AI-powered alert triage
-- Dockerized microservices architecture
-- Designed for extensibility and real-world workflows
-
----
-
-## 🛠️ Running SentinelStack
-
-For setup instructions, environment configuration, Docker Compose commands, and service URLs:
-
-👉 See `RUN.md`
+| Service | Role |
+|---|---|
+| **Next.js Dashboard** | SOC-style UI — events, alerts, system visibility |
+| **logging-service (FastAPI)** | Ingestion, detection, scoring, response, AI enrichment |
+| **demo-app (FastAPI)** | Traffic simulation for testing |
+| **portguard-service (FastAPI)** | Monitors live infrastructure exposure and port changes |
+| **PostgreSQL** | Stores events, alerts, block lists |
+| **NGINX** | Reverse proxy, single entry point |
 
 ---
 
-## 🎯 Project Vision
+## Stack
 
-SentinelStack demonstrates how modern cybersecurity systems can combine:
+| Layer | Tech |
+|---|---|
+| **Backend** | Python, FastAPI |
+| **ML** | scikit-learn (Isolation Forest) |
+| **Frontend** | Next.js, TypeScript, Tailwind CSS |
+| **Data** | PostgreSQL |
+| **AI Triage** | LLM APIs |
+| **Infra** | Docker Compose, NGINX |
 
-- Deterministic detection (rules)
-- Behavioral intelligence (ML)
-- AI-assisted triage (LLMs)
+---
 
-to create a system that is:
+## Running
 
-- Transparent
-- Scalable
-- Explainable
-- SOC-ready
-
-It bridges the gap between traditional SIEM systems and next-generation AI-powered security platforms.
+See `RUN.md` for Docker Compose setup, environment variables, and service URLs.
